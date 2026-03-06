@@ -9,13 +9,11 @@ const SubscriptionId = subscriber.SubscriptionId;
 const HandlerFn = subscriber.HandlerFn;
 const generateSubscriptionId = subscriber.generateSubscriptionId;
 
-/// Registry of all subscriptions (thread-safe with RwLock)
 pub const SubscriberRegistry = struct {
     const Self = @This();
 
-    // Topic -> subscriptions map
     subscriptions: std.StringHashMap(ArrayList(Subscription)),
-    lock: std.Thread.RwLock, // Read-heavy workload (many lookups, few writes)
+    lock: std.Thread.RwLock, 
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) Self {
@@ -37,7 +35,6 @@ pub const SubscriberRegistry = struct {
         self.subscriptions.deinit();
     }
 
-    /// Add new subscription
     pub fn subscribe(
         self: *Self,
         topic: []const u8,
@@ -67,12 +64,10 @@ pub const SubscriberRegistry = struct {
         return id;
     }
 
-    /// Remove subscription
     pub fn unsubscribe(self: *Self, id: SubscriptionId) void {
         self.lock.lock();
         defer self.lock.unlock();
 
-        // Scan all topics for matching ID
         var it = self.subscriptions.iterator();
         while (it.next()) |entry| {
             for (entry.value_ptr.items, 0..) |sub, i| {
@@ -86,7 +81,6 @@ pub const SubscriberRegistry = struct {
         }
     }
 
-    /// Get matching subscribers for event (read-only)
     pub fn getMatching(
         self: *Self,
         event: *const Event,
@@ -97,16 +91,12 @@ pub const SubscriberRegistry = struct {
 
         var matching = ArrayList(Subscription){};
 
-        // Check all topics
         var it = self.subscriptions.iterator();
         while (it.next()) |entry| {
             for (entry.value_ptr.items) |sub| {
-                // Topic match
                 if (!sub.matchesTopic(event.topic)) continue;
 
-                // Filter match
-                const filter_match = sub.filter.matches(event, allocator) catch false;
-                if (!filter_match) continue;
+                if (!sub.filter.matches(event)) continue;
 
                 try matching.append(allocator, sub);
             }
@@ -115,7 +105,6 @@ pub const SubscriberRegistry = struct {
         return matching.toOwnedSlice(allocator);
     }
 
-    /// Get subscription count for a topic
     pub fn getTopicSubscriptionCount(self: *Self, topic: []const u8) usize {
         self.lock.lockShared();
         defer self.lock.unlockShared();
@@ -126,7 +115,6 @@ pub const SubscriberRegistry = struct {
         return 0;
     }
 
-    /// Get total subscription count
     pub fn getTotalSubscriptionCount(self: *Self) usize {
         self.lock.lockShared();
         defer self.lock.unlockShared();
@@ -140,7 +128,6 @@ pub const SubscriberRegistry = struct {
     }
 };
 
-// Test handler functions
 fn testHandler1(event: *const Event, allocator: Allocator) void {
     _ = event;
     _ = allocator;
@@ -185,15 +172,16 @@ test "get matching subscribers" {
     const filter2 = Filter{ .conditions = &.{} };
     _ = try registry.subscribe("Trade.*", filter2, testHandler2);
 
-    const event = Event{
+    var event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"price\":150}",
+        .data = "",
     };
+    event.setField("price", .{ .int = 150 });
 
     const matching = try registry.getMatching(&event, allocator);
     defer allocator.free(matching);
@@ -217,30 +205,32 @@ test "filter matching in registry" {
     _ = try registry.subscribe("Trade.created", filter, testHandler1);
 
     // Event with low price - should not match
-    const low_price_event = Event{
+    var low_price_event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"price\":500}",
+        .data = "",
     };
+    low_price_event.setField("price", .{ .int = 500 });
 
     const low_matching = try registry.getMatching(&low_price_event, allocator);
     defer allocator.free(low_matching);
     try std.testing.expectEqual(@as(usize, 0), low_matching.len);
 
     // Event with high price - should match
-    const high_price_event = Event{
+    var high_price_event = Event{
         .id = 2,
         .timestamp = 200,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 2,
-        .data = "{\"price\":15000}",
+        .data = "",
     };
+    high_price_event.setField("price", .{ .int = 15000 });
 
     const high_matching = try registry.getMatching(&high_price_event, allocator);
     defer allocator.free(high_matching);

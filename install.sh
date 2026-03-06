@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="ted-koomen/zails"
+REPO="tedkoomen/zails"
 INSTALL_DIR="$HOME/.zails/bin"
 
 # Detect OS

@@ -51,6 +51,10 @@ pub const MessageBus = @import("message_bus.zig").MessageBus;
 pub const Event = @import("../event.zig").Event;
 pub const EventType = @import("../event.zig").Event.EventType;
 pub const generateEventId = @import("../event.zig").generateEventId;
+pub const FieldValue = @import("../event.zig").FieldValue;
+pub const Field = @import("../event.zig").Field;
+pub const FixedString = @import("../event.zig").FixedString;
+pub const MAX_EVENT_FIELDS = @import("../event.zig").MAX_EVENT_FIELDS;
 
 // Filters and subscriptions
 pub const Filter = @import("filter.zig").Filter;

@@ -2,6 +2,57 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const proto = @import("proto.zig");
 
+/// Maximum number of typed fields per event for filtering
+pub const MAX_EVENT_FIELDS = 8;
+
+/// Stack-allocated fixed-size string for field values (no heap allocation)
+pub const FixedString = struct {
+    buf: [64]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn init(s: []const u8) FixedString {
+        var fs = FixedString{};
+        const copy_len: u8 = @intCast(@min(s.len, 64));
+        @memcpy(fs.buf[0..copy_len], s[0..copy_len]);
+        fs.len = copy_len;
+        return fs;
+    }
+
+    pub fn slice(self: *const FixedString) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// Typed field value for allocation-free filtering
+pub const FieldValue = union(enum) {
+    none,
+    int: i64,
+    uint: u64,
+    float: f64,
+    string: FixedString,
+    boolean: bool,
+};
+
+/// Named typed field slot on an Event
+pub const Field = struct {
+    name: [32]u8 = undefined,
+    name_len: u8 = 0,
+    value: FieldValue = .none,
+
+    pub fn init(field_name: []const u8, val: FieldValue) Field {
+        var f = Field{};
+        const copy_len: u8 = @intCast(@min(field_name.len, 32));
+        @memcpy(f.name[0..copy_len], field_name[0..copy_len]);
+        f.name_len = copy_len;
+        f.value = val;
+        return f;
+    }
+
+    pub fn nameSlice(self: *const Field) []const u8 {
+        return self.name[0..self.name_len];
+    }
+};
+
 /// Event payload for message bus
 ///
 /// Memory ownership:
@@ -17,6 +68,36 @@ pub const Event = struct {
     model_id: u64,
     data: []const u8, // Serialized model state (protobuf)
     owned: bool = false, // If true, this Event owns its string data
+
+    // Typed fields for allocation-free filtering (defaults preserve backward compat)
+    fields: [MAX_EVENT_FIELDS]Field = [_]Field{.{}} ** MAX_EVENT_FIELDS,
+    field_count: u8 = 0,
+
+    /// Get a typed field value by name, or null if not found
+    pub fn getField(self: *const Event, name: []const u8) ?FieldValue {
+        for (self.fields[0..self.field_count]) |*f| {
+            if (std.mem.eql(u8, f.nameSlice(), name)) {
+                return f.value;
+            }
+        }
+        return null;
+    }
+
+    /// Set a typed field on the event. If field_count is at MAX_EVENT_FIELDS, the call is a no-op.
+    pub fn setField(self: *Event, name: []const u8, value: FieldValue) void {
+        // Check if field already exists (update in place)
+        for (self.fields[0..self.field_count]) |*f| {
+            if (std.mem.eql(u8, f.nameSlice(), name)) {
+                f.value = value;
+                return;
+            }
+        }
+        // Add new field
+        if (self.field_count < MAX_EVENT_FIELDS) {
+            self.fields[self.field_count] = Field.init(name, value);
+            self.field_count += 1;
+        }
+    }
 
     pub const EventType = enum(u8) {
         model_created = 0,

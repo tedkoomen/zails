@@ -1,6 +1,8 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Event = @import("../event.zig").Event;
+const event_mod = @import("../event.zig");
+const Event = event_mod.Event;
+const FieldValue = event_mod.FieldValue;
+const FixedString = event_mod.FixedString;
 
 pub const Filter = struct {
     const Self = @This();
@@ -10,7 +12,7 @@ pub const Filter = struct {
     pub const WhereClause = struct {
         field: []const u8,
         op: Op,
-        value: []const u8, // String representation of value
+        value: []const u8, // String representation of expected value
 
         pub const Op = enum {
             eq,
@@ -25,41 +27,19 @@ pub const Filter = struct {
         };
     };
 
-    pub fn matches(
-        self: *const Self,
-        event: *const Event,
-        allocator: Allocator,
-    ) !bool {
+    /// Allocation-free filter matching against typed Event fields.
+    /// No JSON parsing, no heap allocation — pure value comparison.
+    pub fn matches(self: *const Self, event: *const Event) bool {
         if (self.conditions.len == 0) {
             return true;
         }
 
-        const parsed = std.json.parseFromSlice(
-            std.json.Value,
-            allocator,
-            event.data,
-            .{},
-        ) catch |err| {
-            std.log.warn("Filter: JSON parse error: {}", .{err});
-            return false;
-        };
-        defer parsed.deinit();
-
         for (self.conditions) |condition| {
-            const field_value = getNestedField(parsed.value, condition.field) orelse {
-                std.log.debug("Filter: field '{s}' not found in event data", .{condition.field});
+            const field_value = event.getField(condition.field) orelse {
                 return false;
             };
 
-            const result = evaluateCondition(field_value, condition.op, condition.value);
-            std.log.debug("Filter: field='{s}' op={} value='{s}' result={}", .{
-                condition.field,
-                condition.op,
-                condition.value,
-                result,
-            });
-
-            if (!result) {
+            if (!evaluateCondition(field_value, condition.op, condition.value)) {
                 return false;
             }
         }
@@ -67,35 +47,19 @@ pub const Filter = struct {
         return true;
     }
 
-    fn getNestedField(value: std.json.Value, field_path: []const u8) ?std.json.Value {
-        var current = value;
-        var it = std.mem.splitScalar(u8, field_path, '.');
-
-        while (it.next()) |part| {
-            switch (current) {
-                .object => |obj| {
-                    current = obj.get(part) orelse return null;
-                },
-                else => return null,
-            }
-        }
-
-        return current;
-    }
-
     fn evaluateCondition(
-        field_value: std.json.Value,
+        field_value: FieldValue,
         op: WhereClause.Op,
         expected: []const u8,
     ) bool {
-        switch (field_value) {
-            .string => |s| return evaluateStringCondition(s, op, expected),
-            .integer => |i| return evaluateIntCondition(i, op, expected),
-            .float => |f| return evaluateFloatCondition(f, op, expected),
-            .bool => |b| return evaluateBoolCondition(b, op, expected),
-            .null => return false,
-            else => return false,
-        }
+        return switch (field_value) {
+            .string => |s| evaluateStringCondition(s.slice(), op, expected),
+            .int => |i| evaluateIntCondition(i, op, expected),
+            .uint => |u| evaluateUintCondition(u, op, expected),
+            .float => |f| evaluateFloatCondition(f, op, expected),
+            .boolean => |b| evaluateBoolCondition(b, op, expected),
+            .none => false,
+        };
     }
 
     fn evaluateStringCondition(value: []const u8, op: WhereClause.Op, expected: []const u8) bool {
@@ -143,6 +107,19 @@ pub const Filter = struct {
         };
     }
 
+    fn evaluateUintCondition(value: u64, op: WhereClause.Op, expected: []const u8) bool {
+        const expected_uint = std.fmt.parseInt(u64, expected, 10) catch return false;
+        return switch (op) {
+            .eq => value == expected_uint,
+            .ne => value != expected_uint,
+            .gt => value > expected_uint,
+            .gte => value >= expected_uint,
+            .lt => value < expected_uint,
+            .lte => value <= expected_uint,
+            else => false,
+        };
+    }
+
     fn evaluateFloatCondition(value: f64, op: WhereClause.Op, expected: []const u8) bool {
         const expected_float = std.fmt.parseFloat(f64, expected) catch return false;
         return switch (op) {
@@ -167,8 +144,6 @@ pub const Filter = struct {
 };
 
 test "filter empty conditions matches all" {
-    const allocator = std.testing.allocator;
-
     const filter = Filter{ .conditions = &.{} };
 
     const event = Event{
@@ -178,62 +153,59 @@ test "filter empty conditions matches all" {
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"price\":150}",
+        .data = "",
     };
 
-    const result = try filter.matches(&event, allocator);
+    const result = filter.matches(&event);
     try std.testing.expect(result);
 }
 
 test "filter string equality" {
-    const allocator = std.testing.allocator;
-
     const filter = Filter{
         .conditions = &.{
             .{ .field = "symbol", .op = .eq, .value = "AAPL" },
         },
     };
 
-    const event = Event{
+    var event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\",\"price\":150}",
+        .data = "",
     };
+    event.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    event.setField("price", .{ .int = 150 });
 
-    const result = try filter.matches(&event, allocator);
+    const result = filter.matches(&event);
     try std.testing.expect(result);
 }
 
 test "filter integer comparison" {
-    const allocator = std.testing.allocator;
-
     const filter = Filter{
         .conditions = &.{
             .{ .field = "price", .op = .gt, .value = "100" },
         },
     };
 
-    const event = Event{
+    var event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\",\"price\":150}",
+        .data = "",
     };
+    event.setField("price", .{ .int = 150 });
 
-    const result = try filter.matches(&event, allocator);
+    const result = filter.matches(&event);
     try std.testing.expect(result);
 }
 
 test "filter multiple conditions AND logic" {
-    const allocator = std.testing.allocator;
-
     const filter = Filter{
         .conditions = &.{
             .{ .field = "symbol", .op = .eq, .value = "AAPL" },
@@ -241,26 +213,48 @@ test "filter multiple conditions AND logic" {
         },
     };
 
-    const event = Event{
+    var event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\",\"price\":150}",
+        .data = "",
     };
+    event.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    event.setField("price", .{ .int = 150 });
 
-    const result = try filter.matches(&event, allocator);
+    const result = filter.matches(&event);
     try std.testing.expect(result);
 }
 
 test "filter condition fails" {
-    const allocator = std.testing.allocator;
-
     const filter = Filter{
         .conditions = &.{
             .{ .field = "price", .op = .gt, .value = "200" },
+        },
+    };
+
+    var event = Event{
+        .id = 1,
+        .timestamp = 100,
+        .event_type = .model_created,
+        .topic = "Trade.created",
+        .model_type = "Trade",
+        .model_id = 1,
+        .data = "",
+    };
+    event.setField("price", .{ .int = 150 });
+
+    const result = filter.matches(&event);
+    try std.testing.expect(!result);
+}
+
+test "filter missing field returns false" {
+    const filter = Filter{
+        .conditions = &.{
+            .{ .field = "missing", .op = .eq, .value = "value" },
         },
     };
 
@@ -268,12 +262,61 @@ test "filter condition fails" {
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
-        .topic = "Trade.created",
-        .model_type = "Trade",
+        .topic = "Test.created",
+        .model_type = "Test",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\",\"price\":150}",
+        .data = "",
     };
 
-    const result = try filter.matches(&event, allocator);
+    const result = filter.matches(&event);
     try std.testing.expect(!result);
+}
+
+test "filter boolean comparison" {
+    const filter = Filter{
+        .conditions = &.{
+            .{ .field = "active", .op = .eq, .value = "true" },
+        },
+    };
+
+    var event = Event{
+        .id = 1,
+        .timestamp = 100,
+        .event_type = .model_created,
+        .topic = "Test.created",
+        .model_type = "Test",
+        .model_id = 1,
+        .data = "",
+    };
+    event.setField("active", .{ .boolean = true });
+
+    try std.testing.expect(filter.matches(&event));
+
+    // Change to false - should not match
+    event.setField("active", .{ .boolean = false });
+    try std.testing.expect(!filter.matches(&event));
+}
+
+test "filter float comparison" {
+    const filter = Filter{
+        .conditions = &.{
+            .{ .field = "ratio", .op = .gt, .value = "1.5" },
+        },
+    };
+
+    var event = Event{
+        .id = 1,
+        .timestamp = 100,
+        .event_type = .model_created,
+        .topic = "Test.created",
+        .model_type = "Test",
+        .model_id = 1,
+        .data = "",
+    };
+    event.setField("ratio", .{ .float = 2.0 });
+
+    try std.testing.expect(filter.matches(&event));
+
+    event.setField("ratio", .{ .float = 1.0 });
+    try std.testing.expect(!filter.matches(&event));
 }

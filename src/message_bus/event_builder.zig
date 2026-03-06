@@ -7,8 +7,11 @@
 /// - Automatic ID and timestamp generation
 
 const std = @import("std");
-const Event = @import("../event.zig").Event;
-const generateEventId = @import("../event.zig").generateEventId;
+const event_mod = @import("../event.zig");
+const Event = event_mod.Event;
+const FieldValue = event_mod.FieldValue;
+const FixedString = event_mod.FixedString;
+const generateEventId = event_mod.generateEventId;
 const MessageBus = @import("message_bus.zig").MessageBus;
 const model_topics = @import("model_topics.zig");
 const validateTopicFormat = model_topics.validateTopicFormat;
@@ -63,6 +66,33 @@ pub const EventBuilder = struct {
         var result = self;
         result.event.event_type = event_type;
         return result;
+    }
+
+    /// Set a typed field (generic)
+    pub fn field(self: Self, name: []const u8, value: FieldValue) Self {
+        var result = self;
+        result.event.setField(name, value);
+        return result;
+    }
+
+    /// Set a string typed field
+    pub fn stringField(self: Self, name: []const u8, value: []const u8) Self {
+        return self.field(name, .{ .string = FixedString.init(value) });
+    }
+
+    /// Set an integer typed field
+    pub fn intField(self: Self, name: []const u8, value: i64) Self {
+        return self.field(name, .{ .int = value });
+    }
+
+    /// Set a float typed field
+    pub fn floatField(self: Self, name: []const u8, value: f64) Self {
+        return self.field(name, .{ .float = value });
+    }
+
+    /// Set a boolean typed field
+    pub fn boolField(self: Self, name: []const u8, value: bool) Self {
+        return self.field(name, .{ .boolean = value });
     }
 
     /// Build and return the event
@@ -132,4 +162,32 @@ test "event builder validates topic at compile time" {
 
     // This would fail at compile time (uncomment to test):
     // const bad_event = EventBuilder.init("InvalidTopic").build();
+}
+
+test "event builder typed field setters" {
+    const TradeTopics = model_topics.ModelTopics("Trade");
+    const event = EventBuilder.init(TradeTopics.created)
+        .modelType("Trade")
+        .modelId(1)
+        .stringField("symbol", "AAPL")
+        .intField("price", 15000)
+        .floatField("ratio", 1.5)
+        .boolField("active", true)
+        .build();
+
+    // Verify typed fields
+    const symbol = event.getField("symbol") orelse unreachable;
+    try std.testing.expectEqualStrings("AAPL", symbol.string.slice());
+
+    const price = event.getField("price") orelse unreachable;
+    try std.testing.expectEqual(@as(i64, 15000), price.int);
+
+    const ratio = event.getField("ratio") orelse unreachable;
+    try std.testing.expectEqual(@as(f64, 1.5), ratio.float);
+
+    const active = event.getField("active") orelse unreachable;
+    try std.testing.expectEqual(true, active.boolean);
+
+    // Non-existent field returns null
+    try std.testing.expect(event.getField("nonexistent") == null);
 }

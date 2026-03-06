@@ -1,8 +1,10 @@
 const std = @import("std");
 const testing = std.testing;
 const message_bus = @import("mod.zig");
-const Event = @import("../event.zig").Event;
-const generateEventId = @import("../event.zig").generateEventId;
+const event_mod = @import("../event.zig");
+const Event = event_mod.Event;
+const FixedString = event_mod.FixedString;
+const generateEventId = event_mod.generateEventId;
 
 // ============================================================================
 // Test 1: Basic Publish/Subscribe Flow
@@ -42,7 +44,7 @@ test "basic publish and subscribe flow" {
             .topic = "Test.created",
             .model_type = "Test",
             .model_id = i,
-            .data = "{}",
+            .data = "",
         };
         bus.publish(event);
     }
@@ -99,7 +101,7 @@ test "multiple subscribers to same topic" {
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{}",
+        .data = "",
     };
     bus.publish(event);
 
@@ -134,7 +136,7 @@ test "wildcard topic matching" {
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{}",
+        .data = "",
     };
     bus.publish(event1);
 
@@ -145,7 +147,7 @@ test "wildcard topic matching" {
         .topic = "Trade.updated",
         .model_type = "Trade",
         .model_id = 2,
-        .data = "{}",
+        .data = "",
     };
     bus.publish(event2);
 
@@ -157,7 +159,7 @@ test "wildcard topic matching" {
         .topic = "Portfolio.created",
         .model_type = "Portfolio",
         .model_id = 3,
-        .data = "{}",
+        .data = "",
     };
     bus.publish(event3);
 
@@ -189,27 +191,31 @@ test "filter by integer field - price greater than" {
     const sub_id = try bus.subscribe("Trade.created", filter, testHandler);
 
     // Low price - should NOT match
-    const low_event = Event{
+    var low_event = Event{
         .id = generateEventId(),
         .timestamp = std.time.microTimestamp(),
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\",\"price\":500}",
+        .data = "",
     };
+    low_event.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    low_event.setField("price", .{ .int = 500 });
     bus.publish(low_event);
 
     // High price - should match
-    const high_event = Event{
+    var high_event = Event{
         .id = generateEventId(),
         .timestamp = std.time.microTimestamp(),
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 2,
-        .data = "{\"symbol\":\"TSLA\",\"price\":15000}",
+        .data = "",
     };
+    high_event.setField("symbol", .{ .string = FixedString.init("TSLA") });
+    high_event.setField("price", .{ .int = 15000 });
     bus.publish(high_event);
 
     bus.unsubscribe(sub_id);
@@ -237,27 +243,31 @@ test "filter by string field - exact match" {
     const sub_id = try bus.subscribe("Trade.created", filter, testHandler);
 
     // AAPL - should match
-    const aapl_event = Event{
+    var aapl_event = Event{
         .id = generateEventId(),
         .timestamp = std.time.microTimestamp(),
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\",\"price\":150}",
+        .data = "",
     };
+    aapl_event.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    aapl_event.setField("price", .{ .int = 150 });
     bus.publish(aapl_event);
 
     // TSLA - should NOT match
-    const tsla_event = Event{
+    var tsla_event = Event{
         .id = generateEventId(),
         .timestamp = std.time.microTimestamp(),
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 2,
-        .data = "{\"symbol\":\"TSLA\",\"price\":200}",
+        .data = "",
     };
+    tsla_event.setField("symbol", .{ .string = FixedString.init("TSLA") });
+    tsla_event.setField("price", .{ .int = 200 });
     bus.publish(tsla_event);
 
     bus.unsubscribe(sub_id);
@@ -286,39 +296,45 @@ test "multiple filter conditions with AND logic" {
     const sub_id = try bus.subscribe("Trade.created", filter, testHandler);
 
     // AAPL with high price - MATCHES
-    const match_event = Event{
+    var match_event = Event{
         .id = generateEventId(),
         .timestamp = std.time.microTimestamp(),
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\",\"price\":150}",
+        .data = "",
     };
+    match_event.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    match_event.setField("price", .{ .int = 150 });
     bus.publish(match_event);
 
     // AAPL with low price - NO MATCH
-    const no_match1 = Event{
+    var no_match1 = Event{
         .id = generateEventId(),
         .timestamp = std.time.microTimestamp(),
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 2,
-        .data = "{\"symbol\":\"AAPL\",\"price\":50}",
+        .data = "",
     };
+    no_match1.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    no_match1.setField("price", .{ .int = 50 });
     bus.publish(no_match1);
 
     // TSLA with high price - NO MATCH
-    const no_match2 = Event{
+    var no_match2 = Event{
         .id = generateEventId(),
         .timestamp = std.time.microTimestamp(),
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 3,
-        .data = "{\"symbol\":\"TSLA\",\"price\":200}",
+        .data = "",
     };
+    no_match2.setField("symbol", .{ .string = FixedString.init("TSLA") });
+    no_match2.setField("price", .{ .int = 200 });
     bus.publish(no_match2);
 
     bus.unsubscribe(sub_id);
@@ -348,7 +364,7 @@ test "queue overflow and back-pressure" {
             .topic = "Test.created",
             .model_type = "Test",
             .model_id = i,
-            .data = "{}",
+            .data = "",
         };
         bus.publish(event);
     }
@@ -452,7 +468,7 @@ test "statistics tracking" {
             .topic = "Test.created",
             .model_type = "Test",
             .model_id = i,
-            .data = "{}",
+            .data = "",
         };
         bus.publish(event);
     }
@@ -466,8 +482,6 @@ test "statistics tracking" {
 // ============================================================================
 
 test "filter operators - greater than or equal" {
-    const allocator = testing.allocator;
-
     const filter = message_bus.Filter{
         .conditions = &.{
             .{ .field = "price", .op = .gte, .value = "100" },
@@ -475,48 +489,49 @@ test "filter operators - greater than or equal" {
     };
 
     // Test event with price = 100 (should match)
-    const event1 = Event{
+    var event1 = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"price\":100}",
+        .data = "",
     };
-    const match1 = try filter.matches(&event1, allocator);
+    event1.setField("price", .{ .int = 100 });
+    const match1 = filter.matches(&event1);
     try testing.expect(match1);
 
     // Test event with price = 150 (should match)
-    const event2 = Event{
+    var event2 = Event{
         .id = 2,
         .timestamp = 200,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 2,
-        .data = "{\"price\":150}",
+        .data = "",
     };
-    const match2 = try filter.matches(&event2, allocator);
+    event2.setField("price", .{ .int = 150 });
+    const match2 = filter.matches(&event2);
     try testing.expect(match2);
 
     // Test event with price = 50 (should NOT match)
-    const event3 = Event{
+    var event3 = Event{
         .id = 3,
         .timestamp = 300,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 3,
-        .data = "{\"price\":50}",
+        .data = "",
     };
-    const match3 = try filter.matches(&event3, allocator);
+    event3.setField("price", .{ .int = 50 });
+    const match3 = filter.matches(&event3);
     try testing.expect(!match3);
 }
 
 test "filter operators - not equal" {
-    const allocator = testing.allocator;
-
     const filter = message_bus.Filter{
         .conditions = &.{
             .{ .field = "status", .op = .ne, .value = "cancelled" },
@@ -524,35 +539,35 @@ test "filter operators - not equal" {
     };
 
     // Test event with status = "active" (should match)
-    const event1 = Event{
+    var event1 = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"status\":\"active\"}",
+        .data = "",
     };
-    const match1 = try filter.matches(&event1, allocator);
+    event1.setField("status", .{ .string = FixedString.init("active") });
+    const match1 = filter.matches(&event1);
     try testing.expect(match1);
 
     // Test event with status = "cancelled" (should NOT match)
-    const event2 = Event{
+    var event2 = Event{
         .id = 2,
         .timestamp = 200,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 2,
-        .data = "{\"status\":\"cancelled\"}",
+        .data = "",
     };
-    const match2 = try filter.matches(&event2, allocator);
+    event2.setField("status", .{ .string = FixedString.init("cancelled") });
+    const match2 = filter.matches(&event2);
     try testing.expect(!match2);
 }
 
 test "filter operators - like (substring match)" {
-    const allocator = testing.allocator;
-
     const filter = message_bus.Filter{
         .conditions = &.{
             .{ .field = "symbol", .op = .like, .value = "AA" },
@@ -560,29 +575,31 @@ test "filter operators - like (substring match)" {
     };
 
     // Test event with "AAPL" (contains "AA", should match)
-    const event1 = Event{
+    var event1 = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"symbol\":\"AAPL\"}",
+        .data = "",
     };
-    const match1 = try filter.matches(&event1, allocator);
+    event1.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    const match1 = filter.matches(&event1);
     try testing.expect(match1);
 
     // Test event with "TSLA" (doesn't contain "AA", should NOT match)
-    const event2 = Event{
+    var event2 = Event{
         .id = 2,
         .timestamp = 200,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 2,
-        .data = "{\"symbol\":\"TSLA\"}",
+        .data = "",
     };
-    const match2 = try filter.matches(&event2, allocator);
+    event2.setField("symbol", .{ .string = FixedString.init("TSLA") });
+    const match2 = filter.matches(&event2);
     try testing.expect(!match2);
 }
 

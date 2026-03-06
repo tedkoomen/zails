@@ -105,8 +105,7 @@ pub const SubscriberRegistry = struct {
                 if (!sub.matchesTopic(event.topic)) continue;
 
                 // Filter match
-                const filter_match = sub.filter.matches(event, allocator) catch false;
-                if (!filter_match) continue;
+                if (!sub.filter.matches(event)) continue;
 
                 try matching.append(allocator, sub);
             }
@@ -185,15 +184,16 @@ test "get matching subscribers" {
     const filter2 = Filter{ .conditions = &.{} };
     _ = try registry.subscribe("Trade.*", filter2, testHandler2);
 
-    const event = Event{
+    var event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"price\":150}",
+        .data = "",
     };
+    event.setField("price", .{ .int = 150 });
 
     const matching = try registry.getMatching(&event, allocator);
     defer allocator.free(matching);
@@ -217,30 +217,32 @@ test "filter matching in registry" {
     _ = try registry.subscribe("Trade.created", filter, testHandler1);
 
     // Event with low price - should not match
-    const low_price_event = Event{
+    var low_price_event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"price\":500}",
+        .data = "",
     };
+    low_price_event.setField("price", .{ .int = 500 });
 
     const low_matching = try registry.getMatching(&low_price_event, allocator);
     defer allocator.free(low_matching);
     try std.testing.expectEqual(@as(usize, 0), low_matching.len);
 
     // Event with high price - should match
-    const high_price_event = Event{
+    var high_price_event = Event{
         .id = 2,
         .timestamp = 200,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 2,
-        .data = "{\"price\":15000}",
+        .data = "",
     };
+    high_price_event.setField("price", .{ .int = 15000 });
 
     const high_matching = try registry.getMatching(&high_price_event, allocator);
     defer allocator.free(high_matching);

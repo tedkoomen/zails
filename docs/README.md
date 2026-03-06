@@ -2,6 +2,9 @@
 
 ## For Users
 
+### Getting Started
+- **[Getting Started](guides/getting_started.md)** - Install the CLI, create a project, add handlers
+
 ### Message Bus
 - **[User Guide](message_bus/user_guide.md)** - How to use the message bus in handlers
 - **[Memory Management](message_bus/memory_management.md)** - Event ownership and lifecycle

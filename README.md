@@ -15,16 +15,32 @@
 - **ClickHouse ORM** — ActiveRecord-like models with fluent query builder
 - **Code Generators** — `zails create model/service/migration/scaffold`
 
+## Install
+
+```bash
+# Option 1: Install script
+curl -fsSL https://raw.githubusercontent.com/ted-koomen/zails/main/install.sh | sh
+
+# Option 2: Homebrew (macOS)
+brew tap tedkoomen/zails
+brew install zails
+
+# Option 3: Download binary from GitHub Releases
+# https://github.com/ted-koomen/zails/releases
+```
+
 ## Quick Start
 
 ```bash
-# Build
-zig build
+# Create a new project
+zails init my-server
+cd my-server
 
-# Start server
+# Build and run
+zails build
 ./zig-out/bin/server --ports 8080
 
-# Test
+# Test with the built-in client
 ./zig-out/bin/client 8080 1 "Hello, Zails!"
 ```
 
@@ -107,16 +123,32 @@ Measured on loopback (4-core VM). Production estimates in parentheses.
 | Parse + JSON serialize | < 1 us |
 | Allocations in parse path | 0 |
 
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `zails init <name>` | Create a new project |
+| `zails build` | Regenerate handler registry and compile |
+| `zails create handler <name>` | Generate a handler |
+| `zails create model <name> [--table=...]` | Generate an ORM model |
+| `zails create service <name>` | Generate a gRPC service handler |
+| `zails create migration <name>` | Generate a database migration |
+| `zails create config` | Generate configuration files |
+| `zails scaffold <name> [--fields=...]` | Generate model + migration + service |
+| `zails help` | Show help |
+
 ## Documentation
 
 - **[USAGE.md](USAGE.md)** — Installation, configuration, handlers, UDP feeds, testing
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — Architecture, code style, development workflow
 - **[ROADMAP.md](ROADMAP.md)** — Feature roadmap and project status
 - **[docs/](docs/)** — Message bus guides, memory management
+- **[docs/guides/getting_started.md](docs/guides/getting_started.md)** — Step-by-step new project guide
 
 ## Requirements
 
-- Zig 0.15.2 or later
+- The `zails` CLI is a standalone binary — no dependencies needed to create projects
+- [Zig](https://ziglang.org/download/) 0.15.2 or later (to build generated projects)
 - Linux (for NUMA support, epoll, multicast)
 - Docker (optional, for ClickHouse metrics)
 

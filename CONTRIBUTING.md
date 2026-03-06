@@ -27,7 +27,22 @@ Zails is built on these core principles:
 
 ## Getting Started
 
-### Prerequisites
+### For Users
+
+Install the standalone `zails` CLI and create projects without cloning this repo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ted-koomen/zails/main/install.sh | sh
+zails init my-server
+cd my-server
+zails build
+```
+
+See [USAGE.md](USAGE.md) for full usage details.
+
+### For Contributors
+
+#### Prerequisites
 
 - Zig 0.15.2 or later
 - Linux (for NUMA support)
@@ -35,14 +50,14 @@ Zails is built on these core principles:
 - Docker (for ClickHouse integration testing)
 - Git
 
-### Build from Source
+#### Build from Source
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/zails.git
+git clone https://github.com/ted-koomen/zails.git
 cd zails
 
-# Build all targets
+# Build all targets (including the zails CLI)
 zig build
 
 # Run tests
@@ -51,6 +66,8 @@ zig build test
 # Build and run server
 zig build run -- --ports 8080
 ```
+
+The built CLI at `./zig-out/bin/zails` is fully self-contained — all framework source files are embedded in the binary via `@embedFile`.
 
 ## Project Structure
 
@@ -132,16 +149,24 @@ git checkout -b feature/your-feature-name
 
 #### Adding a New Handler
 
-1. Create `handlers/your_handler.zig`:
+The fastest way is with the generator:
+
+```bash
+zails create handler your_handler
+# Edit handlers/your_handler.zig with your logic
+zails build
+```
+
+Or manually — create `handlers/your_handler.zig`:
 
 ```zig
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const result = @import("result");
 
 pub const MESSAGE_TYPE: u8 = 99; // Unique ID
 
 pub const Context = struct {
-    // Your state here
     pub fn init() Context {
         return .{};
     }
@@ -156,25 +181,22 @@ pub fn handle(
     request_data: []const u8,
     response_buffer: []u8,
     allocator: Allocator,
-) ![]const u8 {
-    // Your logic here
-    return response_buffer[0..0];
+) result.HandlerResponse {
+    _ = context;
+    _ = allocator;
+    const len = @min(request_data.len, response_buffer.len);
+    @memcpy(response_buffer[0..len], request_data[0..len]);
+    return result.HandlerResponse.ok(response_buffer[0..len]);
 }
 ```
 
-2. Register in `handlers/mod.zig`:
+Then rebuild (`zails build` auto-regenerates `handlers/mod.zig`):
 
-```zig
-pub const your_handler = @import("your_handler.zig");
-
-pub const handler_modules = .{
-    echo_handler,
-    ping_handler,
-    your_handler,  // Add here
-};
+```bash
+zails build
 ```
 
-3. Add tests in your handler file:
+Add tests in your handler file:
 
 ```zig
 test "your_handler basic functionality" {
@@ -182,14 +204,14 @@ test "your_handler basic functionality" {
     defer ctx.deinit();
 
     var response_buffer: [4096]u8 = undefined;
-    const result = try handle(
+    const resp = handle(
         &ctx,
         "test input",
         &response_buffer,
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.len > 0);
+    try std.testing.expect(resp.isOk());
 }
 ```
 

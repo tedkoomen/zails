@@ -62,16 +62,19 @@ Transform Zails into a high-performance **gRPC version of Rails** for Zig, combi
 
 ---
 
-### Phase 3: Code Generators
+### Phase 3: Code Generators & Standalone CLI
 
 **Status:** Complete
 
+- `zails init <name>` — creates a new project with embedded framework files (no source repo needed)
 - `zails create model User --table=users` — generates ORM model with auto table name inference
 - `zails create migration add_email_to_users` — timestamped migration with UP/DOWN SQL
 - `zails create service UserService` — gRPC service handler with auto MESSAGE_TYPE assignment
 - `zails scaffold Post --fields=title:String` — full model + migration + service generation
+- **Standalone binary distribution** — all framework source files embedded via `@embedFile`; the CLI works without the source repo
+- **Install methods** — install script (`install.sh`), Homebrew formula, GitHub Releases
 
-**Files:** `src/zails.zig`, `templates/*.template`
+**Files:** `src/zails.zig`, `templates/*.template`, `install.sh`, `Formula/zails.rb`, `.github/workflows/release.yml`
 
 ---
 
@@ -317,8 +320,10 @@ Transform Zails into a high-performance **gRPC version of Rails** for Zig, combi
 - ClickHouse type system
 - HTTP client with connection pooling
 
-### Code Generators (100%)
+### Code Generators & CLI (100%)
 - Model, migration, service, scaffold generators
+- Standalone downloadable binary (framework files embedded)
+- Install script, Homebrew formula, GitHub Releases workflow
 
 ### Event-Driven Architecture (100%)
 - Lock-free message bus with ring buffer
@@ -423,8 +428,9 @@ Transform Zails into a high-performance **gRPC version of Rails** for Zig, combi
 ## Resources
 
 ### Documentation
-- [Usage Guide](USAGE.md)
-- [Contributing Guide](CONTRIBUTING.md)
+- [Usage Guide](USAGE.md) — Installation, CLI commands, configuration, handlers
+- [Getting Started](docs/guides/getting_started.md) — Step-by-step new project guide
+- [Contributing Guide](CONTRIBUTING.md) — Building from source, development workflow
 - [Message Bus User Guide](docs/message_bus/user_guide.md)
 - [Message Bus Memory Management](docs/message_bus/memory_management.md)
 

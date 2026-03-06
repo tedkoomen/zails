@@ -379,22 +379,39 @@ See [ROADMAP.md](ROADMAP.md) for complete feature roadmap and timeline.
 
 ## Quick Reference
 
-### Build & Run
+### Install & New Project
 
 ```bash
-zig build                              # Build server
-zig build run -- --ports 8080          # Run server
-zig test src/proto.zig                 # Run tests
+# Install standalone CLI (no source repo needed)
+curl -fsSL https://raw.githubusercontent.com/ted-koomen/zails/main/install.sh | sh
+
+# Create and build a new project
+zails init my-server
+cd my-server
+zails build
+./zig-out/bin/server --ports 8080
 ```
 
-### Code Generation
+### Build from Source (contributors)
 
 ```bash
-zails create model User               # Generate model
-zails create service UserService      # Generate gRPC service
-zails create migration add_users      # Generate migration
-zails scaffold Post                   # Full CRUD scaffold
-zails build                           # Regenerate handlers/mod.zig
+zig build                              # Build server + CLI
+zig build run -- --ports 8080          # Run server
+zig build test                         # Run tests
+```
+
+### CLI Commands
+
+```bash
+zails init <name>                      # Create a new project
+zails build                            # Regenerate handlers/mod.zig and compile
+zails create handler <name>            # Generate a handler
+zails create model User --table=users  # Generate ORM model
+zails create service UserService       # Generate gRPC service
+zails create migration add_users       # Generate migration
+zails scaffold Post                    # Full CRUD scaffold (model + migration + service)
+zails create config                    # Generate config/ directory
+zails help                             # Show help
 ```
 
 ### Debugging
@@ -425,7 +442,8 @@ zails build                           # Regenerate handlers/mod.zig
 - **Architecture:** High-performance TCP server with epoll workers
 - **Database:** ClickHouse (analytics/OLAP, not OLTP)
 - **Protocol:** Custom protobuf over TCP (gRPC-style)
-- **Language:** Zig 0.13+ (master branch)
+- **Language:** Zig 0.15.2+
+- **Distribution:** Standalone binary (framework files embedded via `@embedFile`)
 
 ## When to Ask for Help
 
@@ -440,6 +458,6 @@ If you encounter:
 
 ---
 
-**Last Updated:** 2026-03-05
+**Last Updated:** 2026-03-06
 **Framework Version:** 0.3.0-alpha
-**Zig Version:** 0.13.0 (master)
+**Zig Version:** 0.15.2

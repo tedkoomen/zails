@@ -7,6 +7,22 @@ const std = @import("std");
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
 
+const EmbeddedFile = struct { name: []const u8, content: []const u8 };
+
+const embedded_server_files = [_]EmbeddedFile{
+    .{ .name = "config.zig", .content = @embedFile("config.zig") },
+    .{ .name = "numa.zig", .content = @embedFile("numa.zig") },
+    .{ .name = "signals.zig", .content = @embedFile("signals.zig") },
+    .{ .name = "proto.zig", .content = @embedFile("proto.zig") },
+    .{ .name = "pool_lockfree.zig", .content = @embedFile("pool_lockfree.zig") },
+    .{ .name = "handler_registry.zig", .content = @embedFile("handler_registry.zig") },
+    .{ .name = "server_framework.zig", .content = @embedFile("server_framework.zig") },
+    .{ .name = "threadpool_framework.zig", .content = @embedFile("threadpool_framework.zig") },
+    .{ .name = "client.zig", .content = @embedFile("client.zig") },
+    .{ .name = "tls_openssl.zig", .content = @embedFile("tls_openssl.zig") },
+    .{ .name = "result.zig", .content = @embedFile("result.zig") },
+};
+
 const Command = enum {
     init,
     build,
@@ -40,7 +56,7 @@ pub fn main() !void {
                 std.log.err("Usage: zails init <project_name>", .{});
                 return error.MissingProjectName;
             }
-            try initProject(allocator, args[2]);
+            try initProject(args[2]);
         },
         .build => {
             try buildProject();
@@ -128,7 +144,7 @@ fn printHelp() void {
     , .{});
 }
 
-fn initProject(allocator: Allocator, project_name: []const u8) !void {
+fn initProject(project_name: []const u8) !void {
     std.log.info("Creating new Zails project: {s}", .{project_name});
 
     // Create project directory
@@ -144,37 +160,16 @@ fn initProject(allocator: Allocator, project_name: []const u8) !void {
 
     std.log.info("  ✓ Created directory structure", .{});
 
-    // Copy server framework files
-    const server_files = [_][]const u8{
-        "config.zig",
-        "numa.zig",
-        "signals.zig",
-        "proto.zig",
-        "pool_lockfree.zig",
-        "handler_registry.zig",
-        "server_framework.zig",
-        "threadpool_framework.zig",
-        "client.zig",
-        "tls_openssl.zig",
-    };
-
-    const zails_install_dir = try getZailsInstallDir(allocator);
-    defer allocator.free(zails_install_dir);
-
-    var zails_dir = try fs.cwd().openDir(zails_install_dir, .{});
-    defer zails_dir.close();
-
-    for (server_files) |filename| {
-        const source = try zails_dir.readFileAlloc(allocator, filename, 1024 * 1024);
-        defer allocator.free(source);
-
+    // Write embedded server framework files
+    {
         var server_dir = try project_dir.openDir("server", .{});
         defer server_dir.close();
 
-        const dest_file = try server_dir.createFile(filename, .{});
-        defer dest_file.close();
-
-        try dest_file.writeAll(source);
+        for (embedded_server_files) |entry| {
+            const dest_file = try server_dir.createFile(entry.name, .{});
+            defer dest_file.close();
+            try dest_file.writeAll(entry.content);
+        }
     }
 
     std.log.info("  ✓ Copied server framework files", .{});
@@ -210,19 +205,6 @@ fn initProject(allocator: Allocator, project_name: []const u8) !void {
     std.log.info("  zails build", .{});
     std.log.info("  ./zig-out/bin/server --ports 8080", .{});
     std.log.info("", .{});
-}
-
-fn getZailsInstallDir(allocator: Allocator) ![]const u8 {
-    // Get the directory where zails is installed (where the src files are)
-    const self_exe_path = try fs.selfExePathAlloc(allocator);
-    defer allocator.free(self_exe_path);
-
-    // Assuming zails binary is in zig-out/bin/, go up to find src/
-    const exe_dir = fs.path.dirname(self_exe_path) orelse return error.InvalidPath;
-    const parent_dir = fs.path.dirname(exe_dir) orelse return error.InvalidPath;
-    const install_dir = fs.path.dirname(parent_dir) orelse return error.InvalidPath;
-
-    return try fs.path.join(allocator, &[_][]const u8{ install_dir, "src" });
 }
 
 fn createHandlersMod(project_dir: fs.Dir) !void {
@@ -670,7 +652,7 @@ fn createReadme(project_dir: fs.Dir, project_name: []const u8) !void {
         \\
         \\## Documentation
         \\
-        \\For full Zails framework documentation, see: https://github.com/yourorg/zails
+        \\For full Zails framework documentation, see: https://github.com/ted-koomen/zails
         \\
     , .{project_name}) catch return error.OutOfMemory;
     defer page_alloc.free(content);

@@ -6,14 +6,14 @@ This guide walks you through installing the CLI, creating a new project, adding 
 
 ```bash
 # Option 1: Install script (Linux & macOS)
-curl -fsSL https://raw.githubusercontent.com/ted-koomen/zails/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tedkoomen/zails/main/install.sh | sh
 
 # Option 2: Homebrew (macOS)
 brew tap tedkoomen/zails
 brew install zails
 
 # Option 3: Download from GitHub Releases
-# https://github.com/ted-koomen/zails/releases
+# https://github.com/tedkoomen/zails/releases
 ```
 
 The `zails` binary is self-contained — no dependencies are needed to create projects.
@@ -41,19 +41,12 @@ my-server/
 │   ├── mod.zig         # Auto-generated handler registry
 │   ├── echo_handler.zig
 │   └── ping_handler.zig
-<<<<<<< HEAD
 ├── server/             # Framework internals (embedded in the CLI binary)
-=======
-├── server/             # Framework internals (copied from Zails)
->>>>>>> 88e114b46c354570abd471432b214d2b8fe34abd
 │   ├── config.zig
 │   ├── handler_registry.zig
 │   ├── pool_lockfree.zig
 │   ├── proto.zig
-<<<<<<< HEAD
 │   ├── result.zig
-=======
->>>>>>> 88e114b46c354570abd471432b214d2b8fe34abd
 │   ├── server_framework.zig
 │   └── ...
 └── src/
@@ -71,15 +64,12 @@ zails build
 
 Test with the built-in client:
 
-<<<<<<< HEAD
 ```bash
 ./zig-out/bin/client 8080 1 "Hello, Zails!"
 ```
 
 The third argument (`1`) is the MESSAGE_TYPE to route to. `1` hits the echo handler, `2` hits the ping handler.
 
-=======
->>>>>>> 88e114b46c354570abd471432b214d2b8fe34abd
 ## Adding a Handler
 
 ### Option 1: Generator

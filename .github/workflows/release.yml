@@ -41,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -53,3 +55,48 @@ jobs:
             zails-x86_64-linux.tar.gz
             zails-aarch64-macos.tar.gz
           generate_release_notes: true
+
+      - name: Update Homebrew formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_LINUX=$(shasum -a 256 zails-x86_64-linux.tar.gz | cut -d ' ' -f 1)
+          SHA_MACOS=$(shasum -a 256 zails-aarch64-macos.tar.gz | cut -d ' ' -f 1)
+
+          cat > Formula/zails.rb << EOF
+          class Zails < Formula
+            desc "High-performance gRPC Rails-like framework for Zig"
+            homepage "https://github.com/Ted-Koomen/zails"
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/Ted-Koomen/zails/releases/download/v#{version}/zails-aarch64-macos.tar.gz"
+                sha256 "${SHA_MACOS}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.intel?
+                url "https://github.com/Ted-Koomen/zails/releases/download/v#{version}/zails-x86_64-linux.tar.gz"
+                sha256 "${SHA_LINUX}"
+              end
+            end
+
+            def install
+              bin.install "zails"
+            end
+
+            test do
+              assert_match "Zails", shell_output("#{bin}/zails help 2>&1")
+            end
+          end
+          EOF
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' Formula/zails.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/zails.rb
+          git commit -m "Update Homebrew formula for v${VERSION}"
+          git push origin HEAD:main

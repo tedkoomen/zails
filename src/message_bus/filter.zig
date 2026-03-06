@@ -12,7 +12,7 @@ pub const Filter = struct {
     pub const WhereClause = struct {
         field: []const u8,
         op: Op,
-        value: []const u8,
+        value: []const u8, // String representation of expected value
 
         pub const Op = enum {
             eq,
@@ -27,6 +27,8 @@ pub const Filter = struct {
         };
     };
 
+    /// Allocation-free filter matching against typed Event fields.
+    /// No JSON parsing, no heap allocation — pure value comparison.
     pub fn matches(self: *const Self, event: *const Event) bool {
         if (self.conditions.len == 0) {
             return true;

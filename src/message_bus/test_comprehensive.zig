@@ -1,8 +1,10 @@
 /// Comprehensive test suite for message bus components
 const std = @import("std");
 const testing = std.testing;
-const Event = @import("../event.zig").Event;
-const generateEventId = @import("../event.zig").generateEventId;
+const event_mod = @import("../event.zig");
+const Event = event_mod.Event;
+const FixedString = event_mod.FixedString;
+const generateEventId = event_mod.generateEventId;
 const Filter = @import("filter.zig").Filter;
 
 // ============================================================================
@@ -40,7 +42,7 @@ test "Event: deinit only frees owned events" {
         .topic = "test",
         .model_type = "test",
         .model_id = 1,
-        .data = "{}",
+        .data = "",
         .owned = false,
     };
     event1.deinit(allocator); // Should not free anything
@@ -98,8 +100,6 @@ test "Event: serialize and deserialize roundtrip" {
 // ============================================================================
 
 test "Filter: empty filter matches all events" {
-    const allocator = testing.allocator;
-
     const filter = Filter{ .conditions = &.{} };
 
     const event = Event{
@@ -109,52 +109,50 @@ test "Filter: empty filter matches all events" {
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"price\":150}",
+        .data = "",
         .owned = false,
     };
 
-    const result = try filter.matches(&event, allocator);
+    const result = filter.matches(&event);
     try testing.expect(result);
 }
 
 test "Filter: string equality" {
-    const allocator = testing.allocator;
-
     const filter = Filter{
         .conditions = &.{
             .{ .field = "name", .op = .eq, .value = "test" },
         },
     };
 
-    const event1 = Event{
+    var event1 = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"name\":\"test\"}",
+        .data = "",
         .owned = false,
     };
+    event1.setField("name", .{ .string = FixedString.init("test") });
 
-    const event2 = Event{
+    var event2 = Event{
         .id = 2,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 2,
-        .data = "{\"name\":\"other\"}",
+        .data = "",
         .owned = false,
     };
+    event2.setField("name", .{ .string = FixedString.init("other") });
 
-    try testing.expect(try filter.matches(&event1, allocator));
-    try testing.expect(!try filter.matches(&event2, allocator));
+    try testing.expect(filter.matches(&event1));
+    try testing.expect(!filter.matches(&event2));
 }
 
 test "Filter: integer comparisons" {
-    const allocator = testing.allocator;
-
     const filter_gt = Filter{
         .conditions = &.{
             .{ .field = "value", .op = .gt, .value = "50" },
@@ -167,37 +165,37 @@ test "Filter: integer comparisons" {
         },
     };
 
-    const event_high = Event{
+    var event_high = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"value\":100}",
+        .data = "",
         .owned = false,
     };
+    event_high.setField("value", .{ .int = 100 });
 
-    const event_low = Event{
+    var event_low = Event{
         .id = 2,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 2,
-        .data = "{\"value\":10}",
+        .data = "",
         .owned = false,
     };
+    event_low.setField("value", .{ .int = 10 });
 
-    try testing.expect(try filter_gt.matches(&event_high, allocator));
-    try testing.expect(!try filter_gt.matches(&event_low, allocator));
-    try testing.expect(!try filter_lt.matches(&event_high, allocator));
-    try testing.expect(try filter_lt.matches(&event_low, allocator));
+    try testing.expect(filter_gt.matches(&event_high));
+    try testing.expect(!filter_gt.matches(&event_low));
+    try testing.expect(!filter_lt.matches(&event_high));
+    try testing.expect(filter_lt.matches(&event_low));
 }
 
 test "Filter: multiple conditions (AND logic)" {
-    const allocator = testing.allocator;
-
     const filter = Filter{
         .conditions = &.{
             .{ .field = "status", .op = .eq, .value = "active" },
@@ -205,58 +203,59 @@ test "Filter: multiple conditions (AND logic)" {
         },
     };
 
-    const event_match = Event{
+    var event_match = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"status\":\"active\",\"priority\":7}",
+        .data = "",
         .owned = false,
     };
+    event_match.setField("status", .{ .string = FixedString.init("active") });
+    event_match.setField("priority", .{ .int = 7 });
 
-    const event_partial = Event{
+    var event_partial = Event{
         .id = 2,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 2,
-        .data = "{\"status\":\"active\",\"priority\":3}",
+        .data = "",
         .owned = false,
     };
+    event_partial.setField("status", .{ .string = FixedString.init("active") });
+    event_partial.setField("priority", .{ .int = 3 });
 
-    try testing.expect(try filter.matches(&event_match, allocator));
-    try testing.expect(!try filter.matches(&event_partial, allocator));
+    try testing.expect(filter.matches(&event_match));
+    try testing.expect(!filter.matches(&event_partial));
 }
 
-test "Filter: nested field access" {
-    const allocator = testing.allocator;
-
+test "Filter: missing field returns false" {
     const filter = Filter{
         .conditions = &.{
-            .{ .field = "user.name", .op = .eq, .value = "john" },
+            .{ .field = "missing_field", .op = .eq, .value = "value" },
         },
     };
 
-    const event = Event{
+    var event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "{\"user\":{\"name\":\"john\",\"age\":30}}",
+        .data = "",
         .owned = false,
     };
+    event.setField("other_field", .{ .string = FixedString.init("value") });
 
-    try testing.expect(try filter.matches(&event, allocator));
+    try testing.expect(!filter.matches(&event));
 }
 
-test "Filter: invalid JSON returns false" {
-    const allocator = testing.allocator;
-
+test "Filter: no fields set returns false for non-empty filter" {
     const filter = Filter{
         .conditions = &.{
             .{ .field = "value", .op = .gt, .value = "50" },
@@ -270,43 +269,12 @@ test "Filter: invalid JSON returns false" {
         .topic = "Test.created",
         .model_type = "Test",
         .model_id = 1,
-        .data = "invalid json{{{",
+        .data = "",
         .owned = false,
     };
 
-    try testing.expect(!try filter.matches(&event, allocator));
+    try testing.expect(!filter.matches(&event));
 }
-
-test "Filter: missing field returns false" {
-    const allocator = testing.allocator;
-
-    const filter = Filter{
-        .conditions = &.{
-            .{ .field = "missing_field", .op = .eq, .value = "value" },
-        },
-    };
-
-    const event = Event{
-        .id = 1,
-        .timestamp = 100,
-        .event_type = .model_created,
-        .topic = "Test.created",
-        .model_type = "Test",
-        .model_id = 1,
-        .data = "{\"other_field\":\"value\"}",
-        .owned = false,
-    };
-
-    try testing.expect(!try filter.matches(&event, allocator));
-}
-
-// ============================================================================
-// Ring Buffer Edge Cases (would need to import ring_buffer.zig)
-// ============================================================================
-
-// Note: These tests would require importing ring_buffer.zig which has
-// import path issues in standalone tests. The integration tests cover
-// ring buffer functionality thoroughly.
 
 // ============================================================================
 // Summary
@@ -316,7 +284,7 @@ test "Filter: missing field returns false" {
 // ✓ Event ownership and lifecycle
 // ✓ Event serialization/deserialization
 // ✓ Filter evaluation (empty, string, integer, multiple conditions)
-// ✓ Filter edge cases (invalid JSON, missing fields, nested fields)
+// ✓ Filter edge cases (missing fields, no fields set)
 // ✓ ID generation uniqueness
 //
 // Additional coverage is provided by:

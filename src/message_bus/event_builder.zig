@@ -5,6 +5,7 @@
 /// - Compile-time topic validation
 /// - Simple, fluent API
 /// - Automatic ID and timestamp generation
+
 const std = @import("std");
 const event_mod = @import("../event.zig");
 const Event = event_mod.Event;
@@ -15,19 +16,22 @@ const MessageBus = @import("message_bus.zig").MessageBus;
 const model_topics = @import("model_topics.zig");
 const validateTopicFormat = model_topics.validateTopicFormat;
 
+/// Event Builder - Fluent API for creating events
 pub const EventBuilder = struct {
     const Self = @This();
 
     event: Event,
 
+    /// Create a new event with compile-time validated topic
     pub fn init(comptime topic: []const u8) Self {
+        // Compile-time validation - fails at compile time if topic format is invalid
         validateTopicFormat(topic);
 
         return Self{
             .event = Event{
                 .id = generateEventId(),
                 .timestamp = std.time.microTimestamp(),
-                .event_type = .custom,
+                .event_type = .custom, // Default to custom
                 .topic = topic,
                 .model_type = "",
                 .model_id = 0,
@@ -36,61 +40,74 @@ pub const EventBuilder = struct {
         };
     }
 
+    /// Set model type (e.g., "User", "Item", "Order")
     pub fn modelType(self: Self, model_type: []const u8) Self {
         var result = self;
         result.event.model_type = model_type;
         return result;
     }
 
+    /// Set model ID
     pub fn modelId(self: Self, model_id: u64) Self {
         var result = self;
         result.event.model_id = model_id;
         return result;
     }
 
+    /// Set event data (JSON string or serialized data)
     pub fn data(self: Self, event_data: []const u8) Self {
         var result = self;
         result.event.data = event_data;
         return result;
     }
 
+    /// Set event type
     pub fn eventType(self: Self, event_type: Event.EventType) Self {
         var result = self;
         result.event.event_type = event_type;
         return result;
     }
 
+    /// Set a typed field (generic)
     pub fn field(self: Self, name: []const u8, value: FieldValue) Self {
         var result = self;
         result.event.setField(name, value);
         return result;
     }
 
+    /// Set a string typed field
     pub fn stringField(self: Self, name: []const u8, value: []const u8) Self {
         return self.field(name, .{ .string = FixedString.init(value) });
     }
 
+    /// Set an integer typed field
     pub fn intField(self: Self, name: []const u8, value: i64) Self {
         return self.field(name, .{ .int = value });
     }
 
+    /// Set a float typed field
     pub fn floatField(self: Self, name: []const u8, value: f64) Self {
         return self.field(name, .{ .float = value });
     }
 
+    /// Set a boolean typed field
     pub fn boolField(self: Self, name: []const u8, value: bool) Self {
         return self.field(name, .{ .boolean = value });
     }
 
+    /// Build and return the event
     pub fn build(self: Self) Event {
         return self.event;
     }
 
+    /// Build and publish to message bus (convenience method)
     pub fn publish(self: Self, bus: *MessageBus) void {
         bus.publish(self.event);
     }
 };
 
+/// Simple helper: Publish event to global message bus
+/// Handlers can use this without knowing about Event internals
 pub fn publishEvent(comptime topic: []const u8, data: []const u8) void {
     const globals = @import("../globals.zig");
     if (globals.global_message_bus) |bus| {
@@ -100,6 +117,7 @@ pub fn publishEvent(comptime topic: []const u8, data: []const u8) void {
     }
 }
 
+/// Helper: Publish model event with full context
 pub fn publishModelEvent(
     comptime topic: []const u8,
     model_type: []const u8,

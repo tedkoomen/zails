@@ -24,18 +24,20 @@ const generateSubscriptionId = subscriber.generateSubscriptionId;
 pub const LockFreeSubscriberRegistry = struct {
     const Self = @This();
 
+    // Subscriptions array (grows as needed, never shrinks)
     subscriptions: std.atomic.Value(*SubscriptionList),
     allocator: Allocator,
 
     pub const SubscriptionList = struct {
         items: []SubscriptionSlot,
-        count: std.atomic.Value(usize),
+        count: std.atomic.Value(usize), // Active subscription count
+        capacity: usize,
     };
 
     pub const SubscriptionSlot = struct {
         subscription: Subscription,
-        active: std.atomic.Value(bool),
-        ever_used: bool,
+        active: std.atomic.Value(bool), // false = deleted
+        ever_used: bool, // true if subscription data has been written
 
         pub fn isActive(self: *const SubscriptionSlot) bool {
             return self.active.load(.acquire);
@@ -72,6 +74,8 @@ pub const LockFreeSubscriberRegistry = struct {
     pub fn deinit(self: *Self) void {
         const list = self.subscriptions.load(.acquire);
 
+        // Free allocated memory for all slots that have been used
+        // (both active and deactivated, since unsubscribe no longer frees)
         for (list.items) |*slot| {
             if (slot.ever_used) {
                 self.allocator.free(slot.subscription.topic);
@@ -115,7 +119,11 @@ pub const LockFreeSubscriberRegistry = struct {
             if (!slot.active.load(.acquire)) {
                 retries = 0;
                 while (retries < max_retries) : (retries += 1) {
+                    // Write data BEFORE making slot visible to readers
                     slot.subscription = sub;
+
+                    // Memory fence: CAS with release ensures subscription data
+                    // is visible to readers who observe active=true with acquire
                     const success = slot.active.cmpxchgWeak(
                         false,
                         true,
@@ -139,6 +147,9 @@ pub const LockFreeSubscriberRegistry = struct {
         return error.RegistryFull;
     }
 
+    /// Remove subscription
+    /// Memory is NOT freed here to avoid use-after-free with concurrent readers.
+    /// Memory is reclaimed in deinit().
     pub fn unsubscribe(self: *Self, id: SubscriptionId) void {
         const list = self.subscriptions.load(.acquire);
 

@@ -652,7 +652,7 @@ fn createReadme(project_dir: fs.Dir, project_name: []const u8) !void {
         \\
         \\## Documentation
         \\
-        \\For full Zails framework documentation, see: https://github.com/ted-koomen/zails
+        \\For full Zails framework documentation, see: https://github.com/yourorg/zails
         \\
     , .{project_name}) catch return error.OutOfMemory;
     defer page_alloc.free(content);

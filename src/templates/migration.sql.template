@@ -1,0 +1,15 @@
+-- Migration: {MIGRATION_NAME}
+-- Created: {TIMESTAMP}
+
+-- Up
+CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+    id UInt64,
+    created_at DateTime64(6),
+    -- Add your columns here
+
+    PRIMARY KEY (id)
+) ENGINE = MergeTree()
+ORDER BY id;
+
+-- Down
+DROP TABLE IF EXISTS {TABLE_NAME};

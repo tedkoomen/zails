@@ -1,0 +1,33 @@
+# Persistence Layer Examples
+
+# Redis
+# persistence:
+#   enabled: true
+#   backend: redis
+#   connection_string: "redis://localhost:6379/0"
+#   pool_size: 20
+#   timeout_ms: 5000
+
+# PostgreSQL
+# persistence:
+#   enabled: true
+#   backend: postgresql
+#   connection_string: "postgresql://user:pass@localhost:5432/zerver"
+#   pool_size: 10
+#   timeout_ms: 10000
+
+# SQLite
+# persistence:
+#   enabled: true
+#   backend: sqlite
+#   connection_string: "/var/lib/zerver/data.db"
+#   pool_size: 1
+#   timeout_ms: 5000
+
+# RocksDB
+# persistence:
+#   enabled: true
+#   backend: rocksdb
+#   connection_string: "/var/lib/zerver/rocksdb"
+#   pool_size: 10
+#   timeout_ms: 1000

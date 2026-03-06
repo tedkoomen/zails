@@ -1,0 +1,118 @@
+# Zerver Configuration
+# Edit this file to configure your server
+
+server:
+  ports: [8080, 8081]
+  worker_threads: auto  # or specify number
+  enable_numa: true
+  pool_size: 2048
+  max_connections: 10000
+  read_timeout_ms: 30000
+  write_timeout_ms: 30000
+
+handlers:
+  # Per-handler configuration
+  echo_handler:
+    enabled: true
+    rate_limit: 0  # 0 = unlimited, or requests/second
+    timeout_ms: 30000
+    max_payload_size: 4096  # bytes
+    capture_payload: false  # Capture request/response samples in ClickHouse
+
+  ping_handler:
+    enabled: true
+    rate_limit: 0  # 0 = unlimited, or requests/second
+    timeout_ms: 30000
+    max_payload_size: 4096  # bytes
+    capture_payload: false
+
+  metrics_handler:
+    enabled: true
+    rate_limit: 0  # 0 = unlimited, or requests/second
+    timeout_ms: 30000
+    max_payload_size: 4096  # bytes
+    capture_payload: false
+
+  control_handler:
+    enabled: true
+    rate_limit: 0  # 0 = unlimited, or requests/second
+    timeout_ms: 30000
+    max_payload_size: 4096  # bytes
+    capture_payload: true  # Capture control commands for audit
+
+  test_handler:
+    enabled: true
+    rate_limit: 0  # 0 = unlimited, or requests/second
+    timeout_ms: 30000
+    max_payload_size: 4096  # bytes
+    capture_payload: false
+
+  analytics_handler:
+    enabled: true
+    rate_limit: 0  # 0 = unlimited, or requests/second
+    timeout_ms: 30000
+    max_payload_size: 4096  # bytes
+    capture_payload: false
+
+metrics:
+  enabled: true
+  export_interval_seconds: 15
+  prometheus:
+    enabled: true
+    port: 9090
+    path: /metrics
+  statsd:
+    enabled: false
+    host: localhost
+    port: 8125
+    prefix: zerver
+
+persistence:
+  enabled: false
+  backend: none  # none | redis | postgresql | sqlite | rocksdb | clickhouse
+  connection_string: ""
+  pool_size: 10
+  timeout_ms: 5000
+
+  # ClickHouse configuration for request metrics
+  clickhouse:
+    enabled: false  # Enable to capture 100% of requests to ClickHouse
+    url: "http://localhost:8123"  # Use https:// for managed ClickHouse
+    database: "zerver"
+    username: "default"
+    password: ""
+    use_tls: false  # Set true for https://
+    batch_size: 1000  # Metrics per batch
+    flush_interval_seconds: 10  # How often to flush batches
+    buffer_capacity: 10000  # Ring buffer size (metrics dropped if full)
+    pool_size: 4  # HTTP connection pool size
+    table_name: "zerver_request_metrics"
+
+sla:
+  enabled: true
+  targets:
+    - name: "latency_p99"
+      metric: "zerver_latency_max_microseconds"
+      threshold: 10000  # 10ms
+      window_seconds: 300  # 5 minutes
+      alert_channel: "webhook:http://localhost:9000/alerts"
+
+    - name: "error_rate"
+      metric: "zerver_requests_failed"
+      threshold: 0.01  # 1%
+      window_seconds: 60
+      alert_channel: "log"
+
+    - name: "pool_exhaustion"
+      metric: "zerver_pool_exhaustions"
+      threshold: 0
+      window_seconds: 60
+      alert_channel: "log"
+
+profiling:
+  enabled: false  # Can be toggled at runtime
+  cpu_profiling: false
+  memory_profiling: false
+  trace_sampling: false
+  sampling_rate: 0.01  # 1% of requests
+  export_flame_graphs: false

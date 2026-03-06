@@ -1,0 +1,27 @@
+# Prometheus Configuration for Zerver
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'production'
+    service: 'zerver'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - localhost:9093
+
+# Load alert rules
+rule_files:
+  - "config/alerts.yaml"
+
+# Scrape configurations
+scrape_configs:
+  - job_name: 'zerver'
+    static_configs:
+      - targets: ['localhost:9999']
+    # Assuming metrics are on message type 255
+    # You may need to set up an HTTP proxy to Prometheus format

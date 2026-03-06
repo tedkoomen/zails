@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package server;
+
+// Generic base request that all requests should embed
+message BaseRequest {
+  string request_id = 1;
+  int64 timestamp = 2;
+  map<string, string> metadata = 3;
+}
+
+// Example echo request
+message EchoRequest {
+  BaseRequest base = 1;
+  string message = 2;
+}
+
+message EchoResponse {
+  string request_id = 1;
+  string message = 2;
+  int64 timestamp = 3;
+}
+
+// Generic request wrapper for different message types
+message Request {
+  oneof request_type {
+    EchoRequest echo = 1;
+    // Add more request types here
+  }
+}
+
+message Response {
+  oneof response_type {
+    EchoResponse echo = 1;
+    // Add more response types here
+  }
+}
+
+service ServerService {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+  // Add more RPC methods here
+}

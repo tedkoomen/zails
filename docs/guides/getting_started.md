@@ -41,12 +41,19 @@ my-server/
 │   ├── mod.zig         # Auto-generated handler registry
 │   ├── echo_handler.zig
 │   └── ping_handler.zig
+<<<<<<< HEAD
 ├── server/             # Framework internals (embedded in the CLI binary)
+=======
+├── server/             # Framework internals (copied from Zails)
+>>>>>>> 88e114b46c354570abd471432b214d2b8fe34abd
 │   ├── config.zig
 │   ├── handler_registry.zig
 │   ├── pool_lockfree.zig
 │   ├── proto.zig
+<<<<<<< HEAD
 │   ├── result.zig
+=======
+>>>>>>> 88e114b46c354570abd471432b214d2b8fe34abd
 │   ├── server_framework.zig
 │   └── ...
 └── src/
@@ -64,12 +71,15 @@ zails build
 
 Test with the built-in client:
 
+<<<<<<< HEAD
 ```bash
 ./zig-out/bin/client 8080 1 "Hello, Zails!"
 ```
 
 The third argument (`1`) is the MESSAGE_TYPE to route to. `1` hits the echo handler, `2` hits the ping handler.
 
+=======
+>>>>>>> 88e114b46c354570abd471432b214d2b8fe34abd
 ## Adding a Handler
 
 ### Option 1: Generator

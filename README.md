@@ -1,4 +1,4 @@
-# Zerver
+# Zails
 
 **High-performance server framework for Zig with zero virtual inheritance, zero mutexes, and zero allocations in the hot path.**
 
@@ -13,7 +13,7 @@
 - **Message Bus** — Lock-free pub/sub event system with entity-owned topics and filtering
 - **UDP Feed Ingestion** — Comptime binary protocol generator for exchange connectivity (ITCH, MDP3, etc.)
 - **ClickHouse ORM** — ActiveRecord-like models with fluent query builder
-- **Code Generators** — `zerver create model/service/migration/scaffold`
+- **Code Generators** — `zails create model/service/migration/scaffold`
 
 ## Quick Start
 
@@ -25,7 +25,7 @@ zig build
 ./zig-out/bin/server --ports 8080
 
 # Test
-./zig-out/bin/client 8080 1 "Hello, Zerver!"
+./zig-out/bin/client 8080 1 "Hello, Zails!"
 ```
 
 ## Architecture

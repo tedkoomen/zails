@@ -24,20 +24,18 @@ const generateSubscriptionId = subscriber.generateSubscriptionId;
 pub const LockFreeSubscriberRegistry = struct {
     const Self = @This();
 
-    // Subscriptions array (grows as needed, never shrinks)
     subscriptions: std.atomic.Value(*SubscriptionList),
     allocator: Allocator,
 
     pub const SubscriptionList = struct {
         items: []SubscriptionSlot,
-        count: std.atomic.Value(usize), // Active subscription count
-        capacity: usize,
+        count: std.atomic.Value(usize),
     };
 
     pub const SubscriptionSlot = struct {
         subscription: Subscription,
-        active: std.atomic.Value(bool), // false = deleted
-        ever_used: bool, // true if subscription data has been written
+        active: std.atomic.Value(bool),
+        ever_used: bool,
 
         pub fn isActive(self: *const SubscriptionSlot) bool {
             return self.active.load(.acquire);
@@ -74,8 +72,6 @@ pub const LockFreeSubscriberRegistry = struct {
     pub fn deinit(self: *Self) void {
         const list = self.subscriptions.load(.acquire);
 
-        // Free allocated memory for all slots that have been used
-        // (both active and deactivated, since unsubscribe no longer frees)
         for (list.items) |*slot| {
             if (slot.ever_used) {
                 self.allocator.free(slot.subscription.topic);
@@ -119,11 +115,7 @@ pub const LockFreeSubscriberRegistry = struct {
             if (!slot.active.load(.acquire)) {
                 retries = 0;
                 while (retries < max_retries) : (retries += 1) {
-                    // Write data BEFORE making slot visible to readers
                     slot.subscription = sub;
-
-                    // Memory fence: CAS with release ensures subscription data
-                    // is visible to readers who observe active=true with acquire
                     const success = slot.active.cmpxchgWeak(
                         false,
                         true,
@@ -147,9 +139,6 @@ pub const LockFreeSubscriberRegistry = struct {
         return error.RegistryFull;
     }
 
-    /// Remove subscription
-    /// Memory is NOT freed here to avoid use-after-free with concurrent readers.
-    /// Memory is reclaimed in deinit().
     pub fn unsubscribe(self: *Self, id: SubscriptionId) void {
         const list = self.subscriptions.load(.acquire);
 
@@ -184,11 +173,7 @@ pub const LockFreeSubscriberRegistry = struct {
                 continue;
             }
 
-            const filter_match = sub.filter.matches(event, allocator) catch |err| {
-                std.log.warn("Subscriber {d}: filter error: {}", .{ sub.id, err });
-                continue;
-            };
-            if (!filter_match) {
+            if (!sub.filter.matches(event)) {
                 std.log.debug("Subscriber {d}: filter no match (conditions={d})", .{ sub.id, sub.filter.conditions.len });
                 continue;
             }
@@ -272,15 +257,16 @@ test "lock-free get matching subscribers" {
     const filter2 = Filter{ .conditions = &.{} };
     _ = try registry.subscribe("Trade.*", filter2, testHandler2);
 
-    const event = Event{
+    var event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"price\":150}",
+        .data = "",
     };
+    event.setField("price", .{ .int = 150 });
 
     const matching = try registry.getMatching(&event, allocator);
     defer allocator.free(matching);
@@ -304,30 +290,32 @@ test "lock-free filter matching in registry" {
     _ = try registry.subscribe("Trade.created", filter, testHandler1);
 
     // Event with low price - should not match
-    const low_price_event = Event{
+    var low_price_event = Event{
         .id = 1,
         .timestamp = 100,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 1,
-        .data = "{\"price\":500}",
+        .data = "",
     };
+    low_price_event.setField("price", .{ .int = 500 });
 
     const low_matching = try registry.getMatching(&low_price_event, allocator);
     defer allocator.free(low_matching);
     try std.testing.expectEqual(@as(usize, 0), low_matching.len);
 
     // Event with high price - should match
-    const high_price_event = Event{
+    var high_price_event = Event{
         .id = 2,
         .timestamp = 200,
         .event_type = .model_created,
         .topic = "Trade.created",
         .model_type = "Trade",
         .model_id = 2,
-        .data = "{\"price\":15000}",
+        .data = "",
     };
+    high_price_event.setField("price", .{ .int = 15000 });
 
     const high_matching = try registry.getMatching(&high_price_event, allocator);
     defer allocator.free(high_matching);

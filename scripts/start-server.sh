@@ -1,15 +1,15 @@
 #!/bin/bash
-# Zerver Server Startup Script
+# Zails Server Startup Script
 # Automatically starts ClickHouse if configured, then starts the server
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-CONFIG_FILE="${PROJECT_ROOT}/config/zerver.yaml"
+CONFIG_FILE="${PROJECT_ROOT}/config/zails.yaml"
 SERVER_BIN="${PROJECT_ROOT}/zig-out/bin/server"
 
-echo "=== Zerver Server Startup ==="
+echo "=== Zails Server Startup ==="
 echo "Project root: $PROJECT_ROOT"
 echo ""
 
@@ -66,7 +66,7 @@ elif [ "$SKIP_CLICKHOUSE" = true ]; then
 fi
 
 # Start the server
-echo "=== Starting Zerver Server ==="
+echo "=== Starting Zails Server ==="
 cd "$PROJECT_ROOT"
 
 # Pass filtered arguments to the server (without --skip-clickhouse)

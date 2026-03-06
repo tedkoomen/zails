@@ -1,4 +1,4 @@
-/// Metrics collection for Zerver
+/// Metrics collection for Zails
 /// Lock-free atomic counters with Prometheus exposition format
 /// Zero allocations in hot path
 
@@ -175,66 +175,66 @@ pub const MetricsRegistry = struct {
         const writer = buffer.writer(arena_allocator);
 
         // HELP and TYPE directives
-        try writer.writeAll("# HELP zerver_requests_total Total number of requests\n");
-        try writer.writeAll("# TYPE zerver_requests_total counter\n");
-        try writer.print("zerver_requests_total {}\n", .{self.total_requests.load(.monotonic)});
+        try writer.writeAll("# HELP zails_requests_total Total number of requests\n");
+        try writer.writeAll("# TYPE zails_requests_total counter\n");
+        try writer.print("zails_requests_total {}\n", .{self.total_requests.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_requests_successful Successful requests\n");
-        try writer.writeAll("# TYPE zerver_requests_successful counter\n");
-        try writer.print("zerver_requests_successful {}\n", .{self.successful_requests.load(.monotonic)});
+        try writer.writeAll("# HELP zails_requests_successful Successful requests\n");
+        try writer.writeAll("# TYPE zails_requests_successful counter\n");
+        try writer.print("zails_requests_successful {}\n", .{self.successful_requests.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_requests_failed Failed requests\n");
-        try writer.writeAll("# TYPE zerver_requests_failed counter\n");
-        try writer.print("zerver_requests_failed {}\n", .{self.failed_requests.load(.monotonic)});
+        try writer.writeAll("# HELP zails_requests_failed Failed requests\n");
+        try writer.writeAll("# TYPE zails_requests_failed counter\n");
+        try writer.print("zails_requests_failed {}\n", .{self.failed_requests.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_latency_average_microseconds Average request latency\n");
-        try writer.writeAll("# TYPE zerver_latency_average_microseconds gauge\n");
-        try writer.print("zerver_latency_average_microseconds {d:.2}\n", .{self.getAverageLatencyUs()});
+        try writer.writeAll("# HELP zails_latency_average_microseconds Average request latency\n");
+        try writer.writeAll("# TYPE zails_latency_average_microseconds gauge\n");
+        try writer.print("zails_latency_average_microseconds {d:.2}\n", .{self.getAverageLatencyUs()});
 
-        try writer.writeAll("# HELP zerver_latency_min_microseconds Minimum request latency\n");
-        try writer.writeAll("# TYPE zerver_latency_min_microseconds gauge\n");
-        try writer.print("zerver_latency_min_microseconds {}\n", .{self.getMinLatencyUs()});
+        try writer.writeAll("# HELP zails_latency_min_microseconds Minimum request latency\n");
+        try writer.writeAll("# TYPE zails_latency_min_microseconds gauge\n");
+        try writer.print("zails_latency_min_microseconds {}\n", .{self.getMinLatencyUs()});
 
-        try writer.writeAll("# HELP zerver_latency_max_microseconds Maximum request latency\n");
-        try writer.writeAll("# TYPE zerver_latency_max_microseconds gauge\n");
-        try writer.print("zerver_latency_max_microseconds {}\n", .{self.max_latency_us.load(.monotonic)});
+        try writer.writeAll("# HELP zails_latency_max_microseconds Maximum request latency\n");
+        try writer.writeAll("# TYPE zails_latency_max_microseconds gauge\n");
+        try writer.print("zails_latency_max_microseconds {}\n", .{self.max_latency_us.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_connections_active Active connections\n");
-        try writer.writeAll("# TYPE zerver_connections_active gauge\n");
-        try writer.print("zerver_connections_active {}\n", .{self.active_connections.load(.monotonic)});
+        try writer.writeAll("# HELP zails_connections_active Active connections\n");
+        try writer.writeAll("# TYPE zails_connections_active gauge\n");
+        try writer.print("zails_connections_active {}\n", .{self.active_connections.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_connections_total Total connections\n");
-        try writer.writeAll("# TYPE zerver_connections_total counter\n");
-        try writer.print("zerver_connections_total {}\n", .{self.total_connections.load(.monotonic)});
+        try writer.writeAll("# HELP zails_connections_total Total connections\n");
+        try writer.writeAll("# TYPE zails_connections_total counter\n");
+        try writer.print("zails_connections_total {}\n", .{self.total_connections.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_pool_acquisitions Object pool acquisitions\n");
-        try writer.writeAll("# TYPE zerver_pool_acquisitions counter\n");
-        try writer.print("zerver_pool_acquisitions {}\n", .{self.pool_acquisitions.load(.monotonic)});
+        try writer.writeAll("# HELP zails_pool_acquisitions Object pool acquisitions\n");
+        try writer.writeAll("# TYPE zails_pool_acquisitions counter\n");
+        try writer.print("zails_pool_acquisitions {}\n", .{self.pool_acquisitions.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_pool_exhaustions Object pool exhaustions\n");
-        try writer.writeAll("# TYPE zerver_pool_exhaustions counter\n");
-        try writer.print("zerver_pool_exhaustions {}\n", .{self.pool_exhaustions.load(.monotonic)});
+        try writer.writeAll("# HELP zails_pool_exhaustions Object pool exhaustions\n");
+        try writer.writeAll("# TYPE zails_pool_exhaustions counter\n");
+        try writer.print("zails_pool_exhaustions {}\n", .{self.pool_exhaustions.load(.monotonic)});
 
-        try writer.writeAll("# HELP zerver_uptime_seconds Server uptime\n");
-        try writer.writeAll("# TYPE zerver_uptime_seconds gauge\n");
-        try writer.print("zerver_uptime_seconds {}\n", .{self.getUptimeSeconds()});
+        try writer.writeAll("# HELP zails_uptime_seconds Server uptime\n");
+        try writer.writeAll("# TYPE zails_uptime_seconds gauge\n");
+        try writer.print("zails_uptime_seconds {}\n", .{self.getUptimeSeconds()});
 
         // Per-handler metrics
-        try writer.writeAll("# HELP zerver_handler_requests_total Requests per handler\n");
-        try writer.writeAll("# TYPE zerver_handler_requests_total counter\n");
+        try writer.writeAll("# HELP zails_handler_requests_total Requests per handler\n");
+        try writer.writeAll("# TYPE zails_handler_requests_total counter\n");
         for (&self.handler_requests, 0..) |*counter, msg_type| {
             const count = counter.load(.monotonic);
             if (count > 0) {
-                try writer.print("zerver_handler_requests_total{{msg_type=\"{}\"}} {}\n", .{ msg_type, count });
+                try writer.print("zails_handler_requests_total{{msg_type=\"{}\"}} {}\n", .{ msg_type, count });
             }
         }
 
-        try writer.writeAll("# HELP zerver_handler_errors_total Errors per handler\n");
-        try writer.writeAll("# TYPE zerver_handler_errors_total counter\n");
+        try writer.writeAll("# HELP zails_handler_errors_total Errors per handler\n");
+        try writer.writeAll("# TYPE zails_handler_errors_total counter\n");
         for (&self.handler_errors, 0..) |*counter, msg_type| {
             const count = counter.load(.monotonic);
             if (count > 0) {
-                try writer.print("zerver_handler_errors_total{{msg_type=\"{}\"}} {}\n", .{ msg_type, count });
+                try writer.print("zails_handler_errors_total{{msg_type=\"{}\"}} {}\n", .{ msg_type, count });
             }
         }
 
@@ -394,6 +394,6 @@ test "metrics export prometheus format" {
     const output = try registry.exportPrometheus(allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.indexOf(u8, output, "zerver_requests_total") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "zerver_latency_average_microseconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "zails_requests_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "zails_latency_average_microseconds") != null);
 }

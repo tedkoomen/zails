@@ -1,4 +1,4 @@
-# Zerver Usage Guide
+# Zails Usage Guide
 
 **Convention-based server framework for Zig with zero virtual inheritance, zero mutexes, and zero allocations in the hot path.**
 
@@ -12,7 +12,7 @@ zig build
 ./zig-out/bin/server --ports 8080
 
 # Test with client
-./zig-out/bin/client 8080 1 "Hello, Zerver!"
+./zig-out/bin/client 8080 1 "Hello, Zails!"
 ```
 
 ## Table of Contents
@@ -47,7 +47,7 @@ This creates:
 - `./zig-out/bin/server` - Production server
 - `./zig-out/bin/client` - Test client
 - `./zig-out/bin/test_harness` - Load tester
-- `./zig-out/bin/zerver` - CLI tool
+- `./zig-out/bin/zails` - CLI tool
 
 ## Basic Usage
 
@@ -74,7 +74,7 @@ This creates:
 
 ```bash
 # Echo handler (MESSAGE_TYPE = 1)
-./zig-out/bin/client 8080 1 "Hello, Zerver!"
+./zig-out/bin/client 8080 1 "Hello, Zails!"
 
 # Ping handler (MESSAGE_TYPE = 2)
 ./zig-out/bin/client 8080 2
@@ -101,7 +101,7 @@ Options:
 
 ### Configuration File
 
-Create `config/zerver.yaml`:
+Create `config/zails.yaml`:
 
 ```yaml
 server:
@@ -119,7 +119,7 @@ persistence:
   clickhouse:
     enabled: false
     url: "http://localhost:8123"
-    database: "zerver"
+    database: "zails"
     batch_size: 1000
     flush_interval_ms: 1000
 ```
@@ -198,7 +198,7 @@ zig build
 
 ## UDP Feed Ingestion
 
-Zerver supports receiving binary data over UDP for exchange connectivity (market data feeds like ITCH, MDP3, OUCH). Protocols are defined at compile time for zero-overhead parsing. Runtime configuration specifies which ports to bind and which protocol to use on each.
+Zails supports receiving binary data over UDP for exchange connectivity (market data feeds like ITCH, MDP3, OUCH). Protocols are defined at compile time for zero-overhead parsing. Runtime configuration specifies which ports to bind and which protocol to use on each.
 
 ### Defining a Binary Protocol
 
@@ -447,7 +447,7 @@ Throughput:         5865.2 req/s
 
 ### Enable ClickHouse
 
-Edit `config/zerver.yaml`:
+Edit `config/zails.yaml`:
 
 ```yaml
 persistence:
@@ -457,7 +457,7 @@ persistence:
   clickhouse:
     enabled: true
     url: "http://localhost:8123"
-    database: "zerver"
+    database: "zails"
 ```
 
 ### Start with ClickHouse
@@ -468,7 +468,7 @@ The startup script automatically starts ClickHouse:
 # This will:
 # - Start ClickHouse Docker container
 # - Create database and schema
-# - Start the Zerver server
+# - Start the Zails server
 ./scripts/start-server.sh --ports 8080
 ```
 
@@ -479,23 +479,23 @@ The startup script automatically starts ClickHouse:
 docker ps | grep clickhouse
 
 # Query metrics
-curl 'http://localhost:8123/?query=SELECT+count()+FROM+zerver.zerver_request_metrics'
+curl 'http://localhost:8123/?query=SELECT+count()+FROM+zails.zails_request_metrics'
 ```
 
 ### Query Metrics
 
 ```bash
 # Total requests
-curl 'http://localhost:8123/?query=SELECT+count()+FROM+zerver.zerver_request_metrics'
+curl 'http://localhost:8123/?query=SELECT+count()+FROM+zails.zails_request_metrics'
 
 # Latest 10 requests
-curl 'http://localhost:8123/?query=SELECT+*+FROM+zerver.zerver_request_metrics+ORDER+BY+timestamp+DESC+LIMIT+10+FORMAT+PrettyCompact'
+curl 'http://localhost:8123/?query=SELECT+*+FROM+zails.zails_request_metrics+ORDER+BY+timestamp+DESC+LIMIT+10+FORMAT+PrettyCompact'
 
 # Latency by handler
-curl 'http://localhost:8123/?query=SELECT+handler_name,count()+as+requests,avg(latency_us)+as+avg_latency_us+FROM+zerver.zerver_request_metrics+GROUP+BY+handler_name+FORMAT+PrettyCompact'
+curl 'http://localhost:8123/?query=SELECT+handler_name,count()+as+requests,avg(latency_us)+as+avg_latency_us+FROM+zails.zails_request_metrics+GROUP+BY+handler_name+FORMAT+PrettyCompact'
 
 # Error rate
-curl 'http://localhost:8123/?query=SELECT+handler_name,countIf(error_code>0)+as+errors,count()+as+total+FROM+zerver.zerver_request_metrics+GROUP+BY+handler_name+FORMAT+PrettyCompact'
+curl 'http://localhost:8123/?query=SELECT+handler_name,countIf(error_code>0)+as+errors,count()+as+total+FROM+zails.zails_request_metrics+GROUP+BY+handler_name+FORMAT+PrettyCompact'
 ```
 
 ### Manual ClickHouse Management
@@ -505,10 +505,10 @@ curl 'http://localhost:8123/?query=SELECT+handler_name,countIf(error_code>0)+as+
 ./scripts/start-clickhouse.sh
 
 # Stop ClickHouse
-docker stop zerver-clickhouse
+docker stop zails-clickhouse
 
 # Remove ClickHouse (deletes data)
-docker rm -f zerver-clickhouse
+docker rm -f zails-clickhouse
 
 # Start server without ClickHouse
 ./scripts/start-server.sh --ports 8080 --skip-clickhouse
@@ -607,10 +607,10 @@ sudo lsof -i :8080
 docker ps -a
 
 # View ClickHouse logs
-docker logs zerver-clickhouse
+docker logs zails-clickhouse
 
 # Clean start
-docker rm -f zerver-clickhouse
+docker rm -f zails-clickhouse
 ./scripts/start-clickhouse.sh
 ```
 

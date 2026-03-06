@@ -1,4 +1,4 @@
-# Zerver Framework Documentation
+# Zails Framework Documentation
 
 ## For Users
 

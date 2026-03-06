@@ -1,10 +1,10 @@
-# Claude AI Context - Zerver Framework
+# Claude AI Context - Zails Framework
 
-This file contains essential context for Claude AI when working on the Zerver framework codebase.
+This file contains essential context for Claude AI when working on the Zails framework codebase.
 
 ## Project Overview
 
-**Zerver** is a high-performance gRPC Rails-like framework written in Zig, designed to achieve sub-100µs latency while providing Rails-like developer experience.
+**Zails** is a high-performance gRPC Rails-like framework written in Zig, designed to achieve sub-100µs latency while providing Rails-like developer experience.
 
 ### Core Principles
 
@@ -57,7 +57,7 @@ Client Response
 │   ├── server_framework.zig        # Core server logic
 │   ├── clickhouse_client.zig       # ClickHouse HTTP client
 │   ├── async_clickhouse.zig        # Async ClickHouse writer
-│   ├── zerver.zig                  # CLI tool (generators)
+│   ├── zails.zig                  # CLI tool (generators)
 │   └── orm/
 │       ├── mod.zig                 # ORM exports
 │       ├── query_builder.zig      # SQL query builder
@@ -202,10 +202,10 @@ Query builders are **stack-allocated** and generate ClickHouse-optimized SQL.
 ### 4. Code Generators
 
 ```bash
-zerver create model User --table=users          # Generate ORM model
-zerver create service UserService               # Generate gRPC service
-zerver create migration add_email               # Generate migration
-zerver scaffold Post --fields=title:String      # Full CRUD scaffold
+zails create model User --table=users          # Generate ORM model
+zails create service UserService               # Generate gRPC service
+zails create migration add_email               # Generate migration
+zails scaffold Post --fields=title:String      # Full CRUD scaffold
 ```
 
 Generators auto-assign MESSAGE_TYPE by scanning existing handlers.
@@ -390,11 +390,11 @@ zig test src/proto.zig                 # Run tests
 ### Code Generation
 
 ```bash
-zerver create model User               # Generate model
-zerver create service UserService      # Generate gRPC service
-zerver create migration add_users      # Generate migration
-zerver scaffold Post                   # Full CRUD scaffold
-zerver build                           # Regenerate handlers/mod.zig
+zails create model User               # Generate model
+zails create service UserService      # Generate gRPC service
+zails create migration add_users      # Generate migration
+zails scaffold Post                   # Full CRUD scaffold
+zails build                           # Regenerate handlers/mod.zig
 ```
 
 ### Debugging

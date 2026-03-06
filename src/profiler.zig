@@ -1,4 +1,4 @@
-/// Performance profiling utilities for Zerver
+/// Performance profiling utilities for Zails
 /// Provides tracing, flame graph support, and performance counters
 
 const std = @import("std");

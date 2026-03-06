@@ -1,11 +1,11 @@
-# Prometheus Configuration for Zerver
+# Prometheus Configuration for Zails
 
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
     cluster: 'production'
-    service: 'zerver'
+    service: 'zails'
 
 # Alertmanager configuration
 alerting:
@@ -20,7 +20,7 @@ rule_files:
 
 # Scrape configurations
 scrape_configs:
-  - job_name: 'zerver'
+  - job_name: 'zails'
     static_configs:
       - targets: ['localhost:9999']
     # Assuming metrics are on message type 255

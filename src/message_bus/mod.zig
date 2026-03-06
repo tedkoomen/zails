@@ -1,6 +1,6 @@
 // Message Bus Module - Event-driven reactive system
 //
-// This module provides a Kafka-like pub/sub message bus for the Zerver framework.
+// This module provides a Kafka-like pub/sub message bus for the Zails framework.
 // It enables reactive, event-driven architectures with:
 //
 // - Lock-free event publishing (< 1µs latency)

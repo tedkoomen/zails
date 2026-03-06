@@ -176,7 +176,7 @@ test "grpc metadata propagation" {
     // Add metadata
     try grpc_req.base.metadata.put(
         try allocator.dupe(u8, "user-agent"),
-        try allocator.dupe(u8, "ZerverClient/1.0"),
+        try allocator.dupe(u8, "ZailsClient/1.0"),
     );
     try grpc_req.base.metadata.put(
         try allocator.dupe(u8, "auth-token"),
@@ -198,7 +198,7 @@ test "grpc metadata propagation" {
     try std.testing.expectEqual(@as(usize, 2), decoded.base.metadata.count());
 
     const user_agent = decoded.base.metadata.get("user-agent");
-    try std.testing.expectEqualStrings("ZerverClient/1.0", user_agent.?);
+    try std.testing.expectEqualStrings("ZailsClient/1.0", user_agent.?);
 
     const auth_token = decoded.base.metadata.get("auth-token");
     try std.testing.expectEqualStrings("secret-token-xyz", auth_token.?);

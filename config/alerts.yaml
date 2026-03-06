@@ -2,11 +2,11 @@
 # Use with: prometheus --config.file=prometheus.yml --rules.file=config/alerts.yaml
 
 groups:
-  - name: zerver_alerts
+  - name: zails_alerts
     interval: 30s
     rules:
       - alert: HighErrorRate
-        expr: rate(zerver_requests_failed[5m]) / rate(zerver_requests_total[5m]) > 0.01
+        expr: rate(zails_requests_failed[5m]) / rate(zails_requests_total[5m]) > 0.01
         for: 5m
         labels:
           severity: warning
@@ -16,7 +16,7 @@ groups:
           description: "Error rate is {{ $value | humanizePercentage }}"
 
       - alert: HighLatencyP99
-        expr: zerver_latency_max_microseconds > 10000
+        expr: zails_latency_max_microseconds > 10000
         for: 5m
         labels:
           severity: warning
@@ -26,7 +26,7 @@ groups:
           description: "P99 latency is {{ $value }}µs (threshold: 10000µs)"
 
       - alert: PoolExhaustion
-        expr: rate(zerver_pool_exhaustions[1m]) > 0
+        expr: rate(zails_pool_exhaustions[1m]) > 0
         for: 1m
         labels:
           severity: critical
@@ -36,17 +36,17 @@ groups:
           description: "Increase --pool-size or investigate memory leak"
 
       - alert: ServerDown
-        expr: up{job="zerver"} == 0
+        expr: up{job="zails"} == 0
         for: 1m
         labels:
           severity: critical
           team: oncall
         annotations:
-          summary: "Zerver server is down"
+          summary: "Zails server is down"
           description: "Server has been unreachable for 1 minute"
 
       - alert: HighConnectionRate
-        expr: rate(zerver_connections_total[1m]) > 1000
+        expr: rate(zails_connections_total[1m]) > 1000
         for: 5m
         labels:
           severity: info

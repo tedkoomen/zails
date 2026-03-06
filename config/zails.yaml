@@ -1,4 +1,4 @@
-# Zerver Configuration
+# Zails Configuration
 # Edit this file to configure your server
 
 server:
@@ -65,7 +65,7 @@ metrics:
     enabled: false
     host: localhost
     port: 8125
-    prefix: zerver
+    prefix: zails
 
 persistence:
   enabled: false
@@ -78,7 +78,7 @@ persistence:
   clickhouse:
     enabled: false  # Enable to capture 100% of requests to ClickHouse
     url: "http://localhost:8123"  # Use https:// for managed ClickHouse
-    database: "zerver"
+    database: "zails"
     username: "default"
     password: ""
     use_tls: false  # Set true for https://
@@ -86,25 +86,25 @@ persistence:
     flush_interval_seconds: 10  # How often to flush batches
     buffer_capacity: 10000  # Ring buffer size (metrics dropped if full)
     pool_size: 4  # HTTP connection pool size
-    table_name: "zerver_request_metrics"
+    table_name: "zails_request_metrics"
 
 sla:
   enabled: true
   targets:
     - name: "latency_p99"
-      metric: "zerver_latency_max_microseconds"
+      metric: "zails_latency_max_microseconds"
       threshold: 10000  # 10ms
       window_seconds: 300  # 5 minutes
       alert_channel: "webhook:http://localhost:9000/alerts"
 
     - name: "error_rate"
-      metric: "zerver_requests_failed"
+      metric: "zails_requests_failed"
       threshold: 0.01  # 1%
       window_seconds: 60
       alert_channel: "log"
 
     - name: "pool_exhaustion"
-      metric: "zerver_pool_exhaustions"
+      metric: "zails_pool_exhaustions"
       threshold: 0
       window_seconds: 60
       alert_channel: "log"

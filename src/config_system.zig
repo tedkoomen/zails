@@ -1,11 +1,11 @@
-/// Advanced configuration system for Zerver
+/// Advanced configuration system for Zails
 /// Supports YAML/JSON config files with runtime reloading
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Zerver configuration (loaded from config/)
-pub const ZerverConfig = struct {
+/// Zails configuration (loaded from config/)
+pub const ZailsConfig = struct {
     server: ServerConfig,
     metrics: MetricsConfig,
     persistence: PersistenceConfig,
@@ -116,9 +116,9 @@ pub const ZerverConfig = struct {
     };
 
     /// Load configuration from file
-    /// ⚠️  NOT IMPLEMENTED - Use default() or build ZerverConfig manually ⚠️
+    /// ⚠️  NOT IMPLEMENTED - Use default() or build ZailsConfig manually ⚠️
     /// JSON and YAML parsing are stubbed out and will return error.NotImplemented
-    pub fn loadFromFile(allocator: Allocator, path: []const u8) !ZerverConfig {
+    pub fn loadFromFile(allocator: Allocator, path: []const u8) !ZailsConfig {
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
 
@@ -137,28 +137,28 @@ pub const ZerverConfig = struct {
 
     /// Parse JSON configuration
     /// TODO: Implement using std.json.parseFromSlice
-    fn parseJSON(allocator: Allocator, content: []const u8) !ZerverConfig {
+    fn parseJSON(allocator: Allocator, content: []const u8) !ZailsConfig {
         _ = allocator;
         _ = content;
-        std.log.err("JSON config parsing not implemented - use ZerverConfig.default() instead", .{});
+        std.log.err("JSON config parsing not implemented - use ZailsConfig.default() instead", .{});
         return error.NotImplemented;
     }
 
     /// Parse YAML configuration
     /// TODO: Implement using external YAML parser library
-    fn parseYAML(allocator: Allocator, content: []const u8) !ZerverConfig {
+    fn parseYAML(allocator: Allocator, content: []const u8) !ZailsConfig {
         _ = allocator;
         _ = content;
-        std.log.err("YAML config parsing not implemented - use ZerverConfig.default() instead", .{});
+        std.log.err("YAML config parsing not implemented - use ZailsConfig.default() instead", .{});
         return error.NotImplemented;
     }
 
     /// Generate default configuration
-    pub fn default(allocator: Allocator) !ZerverConfig {
+    pub fn default(allocator: Allocator) !ZailsConfig {
         const ports = try allocator.alloc(u16, 1);
         ports[0] = 8080;
 
-        return ZerverConfig{
+        return ZailsConfig{
             .server = .{
                 .ports = ports,
                 .worker_threads = null, // Auto-detect
@@ -180,7 +180,7 @@ pub const ZerverConfig = struct {
                     .enabled = false,
                     .host = "localhost",
                     .port = 8125,
-                    .prefix = "zerver",
+                    .prefix = "zails",
                 },
             },
             .persistence = .{
@@ -192,7 +192,7 @@ pub const ZerverConfig = struct {
                 .clickhouse = .{
                     .enabled = false,
                     .url = "http://localhost:8123",
-                    .database = "zerver",
+                    .database = "zails",
                     .username = "default",
                     .password = "",
                     .use_tls = false,
@@ -200,7 +200,7 @@ pub const ZerverConfig = struct {
                     .flush_interval_seconds = 10,
                     .buffer_capacity = 10000,
                     .pool_size = 4,
-                    .table_name = "zerver_request_metrics",
+                    .table_name = "zails_request_metrics",
                 },
             },
             .sla = .{
@@ -223,11 +223,11 @@ pub const ZerverConfig = struct {
     }
 
     /// Export as YAML
-    pub fn exportYAML(self: *const ZerverConfig, allocator: Allocator) ![]const u8 {
+    pub fn exportYAML(self: *const ZailsConfig, allocator: Allocator) ![]const u8 {
         var buffer = std.ArrayList(u8).init(allocator);
         const writer = buffer.writer(allocator);
 
-        try writer.writeAll("# Zerver Configuration\n\n");
+        try writer.writeAll("# Zails Configuration\n\n");
 
         // Server section
         try writer.writeAll("server:\n");
@@ -307,7 +307,7 @@ pub const ZerverConfig = struct {
         return buffer.toOwnedSlice(allocator);
     }
 
-    pub fn deinit(self: *ZerverConfig, allocator: Allocator) void {
+    pub fn deinit(self: *ZailsConfig, allocator: Allocator) void {
         allocator.free(self.server.ports);
         // Free other allocated fields as needed
     }
@@ -322,7 +322,7 @@ pub const RuntimeController = struct {
     memory_profiling_enabled: std.atomic.Value(bool),
     trace_sampling_enabled: std.atomic.Value(bool),
 
-    pub fn init(config: *const ZerverConfig) RuntimeController {
+    pub fn init(config: *const ZailsConfig) RuntimeController {
         return .{
             .metrics_enabled = std.atomic.Value(bool).init(config.metrics.enabled),
             .profiling_enabled = std.atomic.Value(bool).init(config.profiling.enabled),

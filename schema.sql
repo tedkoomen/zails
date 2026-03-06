@@ -1,10 +1,10 @@
--- ClickHouse Schema for Zerver Request Metrics
+-- ClickHouse Schema for Zails Request Metrics
 -- Run this to create the database and table:
 -- curl 'http://localhost:8123/' --data-binary @schema.sql
 
-CREATE DATABASE IF NOT EXISTS zerver;
+CREATE DATABASE IF NOT EXISTS zails;
 
-CREATE TABLE IF NOT EXISTS zerver.zerver_request_metrics
+CREATE TABLE IF NOT EXISTS zails.zails_request_metrics
 (
     -- Timestamp
     timestamp DateTime64(6) DEFAULT now64(),
@@ -44,7 +44,7 @@ ORDER BY (date, timestamp)
 TTL date + INTERVAL 30 DAY;
 
 -- Materialized view for handler statistics
-CREATE MATERIALIZED VIEW IF NOT EXISTS zerver.handler_stats_mv
+CREATE MATERIALIZED VIEW IF NOT EXISTS zails.handler_stats_mv
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(date)
 ORDER BY (date, hour, handler_name)
@@ -62,11 +62,11 @@ AS SELECT
     sum(request_size) as total_request_bytes,
     sum(response_size) as total_response_bytes,
     sumIf(1, error_code > 0) as error_count
-FROM zerver.zerver_request_metrics
+FROM zails.zails_request_metrics
 GROUP BY date, hour, handler_name, message_type;
 
 -- Materialized view for error tracking
-CREATE MATERIALIZED VIEW IF NOT EXISTS zerver.error_tracking_mv
+CREATE MATERIALIZED VIEW IF NOT EXISTS zails.error_tracking_mv
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(date)
 ORDER BY (date, hour, error_code, handler_name)
@@ -77,7 +77,7 @@ AS SELECT
     handler_name,
     error_message,
     count() as error_count
-FROM zerver.zerver_request_metrics
+FROM zails.zails_request_metrics
 WHERE error_code > 0
 GROUP BY date, hour, error_code, handler_name, error_message;
 
@@ -91,7 +91,7 @@ GROUP BY date, hour, error_code, handler_name, error_message;
 --     quantile(0.95)(latency_us) as p95_us,
 --     quantile(0.99)(latency_us) as p99_us,
 --     max(latency_us) as max_us
--- FROM zerver.zerver_request_metrics
+-- FROM zails.zails_request_metrics
 -- WHERE timestamp >= now() - INTERVAL 24 HOUR
 -- GROUP BY handler_name
 -- ORDER BY requests DESC;
@@ -102,7 +102,7 @@ GROUP BY date, hour, error_code, handler_name, error_message;
 --     count() as total_requests,
 --     sumIf(1, error_code > 0) as errors,
 --     (errors / total_requests) * 100 as error_rate_pct
--- FROM zerver.zerver_request_metrics
+-- FROM zails.zails_request_metrics
 -- WHERE timestamp >= now() - INTERVAL 1 HOUR
 -- GROUP BY handler_name
 -- ORDER BY error_rate_pct DESC;
@@ -111,7 +111,7 @@ GROUP BY date, hour, error_code, handler_name, error_message;
 -- SELECT
 --     toStartOfMinute(timestamp) as minute,
 --     count() as requests_per_minute
--- FROM zerver.zerver_request_metrics
+-- FROM zails.zails_request_metrics
 -- WHERE timestamp >= now() - INTERVAL 1 HOUR
 -- GROUP BY minute
 -- ORDER BY minute;
@@ -124,7 +124,7 @@ GROUP BY date, hour, error_code, handler_name, error_message;
 --     request_id,
 --     error_code,
 --     error_message
--- FROM zerver.zerver_request_metrics
+-- FROM zails.zails_request_metrics
 -- WHERE timestamp >= now() - INTERVAL 1 HOUR
 -- ORDER BY latency_us DESC
 -- LIMIT 10;
@@ -134,7 +134,7 @@ GROUP BY date, hour, error_code, handler_name, error_message;
 --     worker_id,
 --     count() as requests,
 --     avg(latency_us) as avg_latency_us
--- FROM zerver.zerver_request_metrics
+-- FROM zails.zails_request_metrics
 -- WHERE timestamp >= now() - INTERVAL 1 HOUR
 -- GROUP BY worker_id
 -- ORDER BY worker_id;

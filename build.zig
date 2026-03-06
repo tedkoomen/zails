@@ -106,29 +106,29 @@ pub fn build(b: *std.Build) void {
     const message_bus_test_step = b.step("test-message-bus", "Run message bus module tests (including event_builder)");
     message_bus_test_step.dependOn(&run_message_bus_tests.step);
 
-    // Zerver CLI tool
-    const zerver_module = b.createModule(.{
-        .root_source_file = b.path("src/zerver.zig"),
+    // Zails CLI tool
+    const zails_module = b.createModule(.{
+        .root_source_file = b.path("src/zails.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const zerver_exe = b.addExecutable(.{
-        .name = "zerver",
-        .root_module = zerver_module,
+    const zails_exe = b.addExecutable(.{
+        .name = "zails",
+        .root_module = zails_module,
     });
 
-    b.installArtifact(zerver_exe);
+    b.installArtifact(zails_exe);
 
-    const zerver_run_cmd = b.addRunArtifact(zerver_exe);
-    zerver_run_cmd.step.dependOn(b.getInstallStep());
+    const zails_run_cmd = b.addRunArtifact(zails_exe);
+    zails_run_cmd.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
-        zerver_run_cmd.addArgs(args);
+        zails_run_cmd.addArgs(args);
     }
 
-    const zerver_run_step = b.step("zerver", "Run the zerver CLI");
-    zerver_run_step.dependOn(&zerver_run_cmd.step);
+    const zails_run_step = b.step("zails", "Run the zails CLI");
+    zails_run_step.dependOn(&zails_run_cmd.step);
 
     // Test harness for load testing
     const test_harness_module = b.createModule(.{

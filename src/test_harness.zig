@@ -1,4 +1,4 @@
-/// Comprehensive test harness for Zerver
+/// Comprehensive test harness for Zails
 /// Includes unit tests, load tests, and stress tests with assertions
 
 const std = @import("std");

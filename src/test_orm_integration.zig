@@ -5,7 +5,7 @@ const std = @import("std");
 const orm = @import("orm/mod.zig");
 
 test "orm model creation with all field types" {
-    const RequestMetric = orm.Model("zerver_request_metrics", .{
+    const RequestMetric = orm.Model("zails_request_metrics", .{
         .id = orm.FieldDef{ .type = .UInt64, .primary_key = true },
         .timestamp = orm.FieldDef{ .type = .DateTime64 },
         .request_id = orm.FieldDef{ .type = .UUID },
@@ -16,14 +16,14 @@ test "orm model creation with all field types" {
     });
 
     // Test table name
-    try std.testing.expectEqualStrings("zerver_request_metrics", RequestMetric.getTableName());
+    try std.testing.expectEqualStrings("zails_request_metrics", RequestMetric.getTableName());
 
     // Test CREATE TABLE SQL generation
     var buffer: [2048]u8 = undefined;
     const create_sql = try RequestMetric.buildCreateTableSQL(&buffer);
 
     // Verify SQL structure
-    try std.testing.expect(std.mem.indexOf(u8, create_sql, "CREATE TABLE IF NOT EXISTS zerver_request_metrics") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create_sql, "CREATE TABLE IF NOT EXISTS zails_request_metrics") != null);
     try std.testing.expect(std.mem.indexOf(u8, create_sql, "id UInt64") != null);
     try std.testing.expect(std.mem.indexOf(u8, create_sql, "timestamp DateTime64") != null);
     try std.testing.expect(std.mem.indexOf(u8, create_sql, "request_id UUID") != null);

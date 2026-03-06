@@ -1,6 +1,6 @@
-# Contributing to Zerver
+# Contributing to Zails
 
-This guide covers development, testing, and contribution guidelines for Zerver.
+This guide covers development, testing, and contribution guidelines for Zails.
 
 ## Table of Contents
 
@@ -17,7 +17,7 @@ This guide covers development, testing, and contribution guidelines for Zerver.
 
 **One Way To Do It** - Convention over configuration
 
-Zerver is built on these core principles:
+Zails is built on these core principles:
 
 1. **Convention over Configuration** - Rails-like approach to reduce boilerplate
 2. **Comptime Everything** - Zero runtime polymorphism
@@ -39,8 +39,8 @@ Zerver is built on these core principles:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/zerver.git
-cd zerver
+git clone https://github.com/yourusername/zails.git
+cd zails
 
 # Build all targets
 zig build
@@ -55,11 +55,11 @@ zig build run -- --ports 8080
 ## Project Structure
 
 ```
-zerver/
+zails/
 ├── src/
 │   ├── main.zig                    # Entry point
 │   ├── config.zig                  # CLI argument parsing
-│   ├── config_system.zig           # Advanced config (ZerverConfig)
+│   ├── config_system.zig           # Advanced config (ZailsConfig)
 │   ├── handler_registry.zig        # Comptime handler dispatch
 │   ├── epoll_threadpool.zig        # Epoll-based worker pool
 │   ├── numa.zig                    # NUMA topology detection
@@ -74,7 +74,7 @@ zerver/
 │   ├── metrics.zig                 # Metrics registry
 │   ├── clickhouse_client.zig       # ClickHouse HTTP client
 │   ├── async_clickhouse.zig        # Async ClickHouse writer
-│   ├── zerver.zig                  # CLI tool (generators)
+│   ├── zails.zig                  # CLI tool (generators)
 │   │
 │   ├── message_bus/                # Event-driven pub/sub system
 │   │   ├── mod.zig                 # Public exports
@@ -286,13 +286,6 @@ zig test src/your_file.zig
 ```
 
 ### 4. Submit Pull Request
-I recognize that AI-assisted tools (e.g., code generation, refactoring, documentation support) are increasingly common in software development. Contributors are welcome to use AI tools to assist in preparing pull requests, as long as they carefully review, validate, and take full responsibility for the submitted code.
-
-All contributions must meet the project's quality standards, including correctness, readability, maintainability, and appropriate test coverage. Submitting AI-generated code does not exempt contributors from understanding and being able to explain their changes.
-
-To maintain review quality pull requests containing more than 1,000 lines of changes (additions + deletions) will be automatically closed. If your work exceeds this threshold, please split it into smaller, logically scoped pull requests.
-
-By submitting a contribution, you acknowledge that you have reviewed all code (whether AI-assisted or not) and stand behind its correctness and quality.
 
 1. Commit your changes with clear messages:
 ```bash
@@ -380,10 +373,10 @@ The test harness supports multiple modes:
 ./zig-out/bin/test_harness 8080 50 10000
 
 # Query metrics
-curl 'http://localhost:8123/?query=SELECT+count()+FROM+zerver.zerver_request_metrics'
+curl 'http://localhost:8123/?query=SELECT+count()+FROM+zails.zails_request_metrics'
 
 # Cleanup
-docker stop zerver-clickhouse
+docker stop zails-clickhouse
 ```
 
 ## Performance Benchmarking

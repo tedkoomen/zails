@@ -121,7 +121,7 @@ pub fn Model(comptime table_name: []const u8, comptime fields: anytype) type {
 
 // Tests
 test "model basic usage" {
-    const RequestMetric = Model("zerver_request_metrics", .{
+    const RequestMetric = Model("zails_request_metrics", .{
         .id = field_types.FieldDef{ .type = .UInt64, .primary_key = true },
         .timestamp = field_types.FieldDef{ .type = .DateTime64 },
         .request_id = field_types.FieldDef{ .type = .UUID },
@@ -131,14 +131,14 @@ test "model basic usage" {
     });
 
     // Test table name
-    try std.testing.expectEqualStrings("zerver_request_metrics", RequestMetric.getTableName());
+    try std.testing.expectEqualStrings("zails_request_metrics", RequestMetric.getTableName());
 
     // Test CREATE TABLE generation
     var buffer: [2048]u8 = undefined;
     const create_sql = try RequestMetric.buildCreateTableSQL(&buffer);
 
     // Verify it contains expected elements
-    try std.testing.expect(std.mem.indexOf(u8, create_sql, "CREATE TABLE IF NOT EXISTS zerver_request_metrics") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create_sql, "CREATE TABLE IF NOT EXISTS zails_request_metrics") != null);
     try std.testing.expect(std.mem.indexOf(u8, create_sql, "id UInt64") != null);
     try std.testing.expect(std.mem.indexOf(u8, create_sql, "LowCardinality(String)") != null);
     try std.testing.expect(std.mem.indexOf(u8, create_sql, "ORDER BY id") != null);

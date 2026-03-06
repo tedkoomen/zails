@@ -1,4 +1,4 @@
-/// Generic test client for Zerver
+/// Generic test client for Zails
 /// Supports sending different message types to test handlers
 
 const std = @import("std");
@@ -25,7 +25,7 @@ pub fn main() !void {
     else
         1;
 
-    const data = if (args.len > 3) args[3] else "Hello, Zerver!";
+    const data = if (args.len > 3) args[3] else "Hello, Zails!";
 
     std.log.info("Connecting to localhost:{}...", .{port});
 

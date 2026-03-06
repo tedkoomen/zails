@@ -3,7 +3,7 @@
 // ============================================================================
 //
 // This file provides practical, copy-paste-ready examples for using the
-// Message Bus in the Zerver framework.
+// Message Bus in the Zails framework.
 //
 // ============================================================================
 

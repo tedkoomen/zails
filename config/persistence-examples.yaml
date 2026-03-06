@@ -12,7 +12,7 @@
 # persistence:
 #   enabled: true
 #   backend: postgresql
-#   connection_string: "postgresql://user:pass@localhost:5432/zerver"
+#   connection_string: "postgresql://user:pass@localhost:5432/zails"
 #   pool_size: 10
 #   timeout_ms: 10000
 
@@ -20,7 +20,7 @@
 # persistence:
 #   enabled: true
 #   backend: sqlite
-#   connection_string: "/var/lib/zerver/data.db"
+#   connection_string: "/var/lib/zails/data.db"
 #   pool_size: 1
 #   timeout_ms: 5000
 
@@ -28,6 +28,6 @@
 # persistence:
 #   enabled: true
 #   backend: rocksdb
-#   connection_string: "/var/lib/zerver/rocksdb"
+#   connection_string: "/var/lib/zails/rocksdb"
 #   pool_size: 10
 #   timeout_ms: 1000

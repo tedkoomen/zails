@@ -1,8 +1,8 @@
-# Zerver Framework Roadmap
+# Zails Framework Roadmap
 
 ## Vision
 
-Transform Zerver into a high-performance **gRPC version of Rails** for Zig, combining:
+Transform Zails into a high-performance **gRPC version of Rails** for Zig, combining:
 - **gRPC + Protocol Buffers** for the protocol layer (maintaining sub-150µs latency)
 - **ActiveRecord-like ORM** for ClickHouse database access
 - **Convention-over-configuration** with powerful code generators
@@ -66,12 +66,12 @@ Transform Zerver into a high-performance **gRPC version of Rails** for Zig, comb
 
 **Status:** Complete
 
-- `zerver create model User --table=users` — generates ORM model with auto table name inference
-- `zerver create migration add_email_to_users` — timestamped migration with UP/DOWN SQL
-- `zerver create service UserService` — gRPC service handler with auto MESSAGE_TYPE assignment
-- `zerver scaffold Post --fields=title:String` — full model + migration + service generation
+- `zails create model User --table=users` — generates ORM model with auto table name inference
+- `zails create migration add_email_to_users` — timestamped migration with UP/DOWN SQL
+- `zails create service UserService` — gRPC service handler with auto MESSAGE_TYPE assignment
+- `zails scaffold Post --fields=title:String` — full model + migration + service generation
 
-**Files:** `src/zerver.zig`, `templates/*.template`
+**Files:** `src/zails.zig`, `templates/*.template`
 
 ---
 
@@ -154,18 +154,18 @@ Transform Zerver into a high-performance **gRPC version of Rails** for Zig, comb
 - Dry-run mode
 
 #### 7.2 Schema Management
-- `zerver migrate` — run pending migrations
-- `zerver migrate:rollback` — rollback last migration
-- `zerver migrate:status` — show migration status
+- `zails migrate` — run pending migrations
+- `zails migrate:rollback` — rollback last migration
+- `zails migrate:status` — show migration status
 
 #### 7.3 Schema Diffing
 - Detect schema changes automatically
 - Generate migrations from model changes
-- `zerver migrate:generate` — auto-create migration
+- `zails migrate:generate` — auto-create migration
 
 #### 7.4 Seed Data
 - `seeds/` directory for test data
-- `zerver db:seed` command
+- `zails db:seed` command
 - Environment-specific seeds
 
 ---
@@ -215,7 +215,7 @@ Transform Zerver into a high-performance **gRPC version of Rails** for Zig, comb
 **Status:** Planned
 
 #### 9.1 REPL / Console
-- `zerver console` — interactive REPL
+- `zails console` — interactive REPL
 - Query models directly
 - Test queries in development
 

@@ -4,7 +4,7 @@
 
 set -e
 
-CONTAINER_NAME="zerver-clickhouse"
+CONTAINER_NAME="zails-clickhouse"
 CLICKHOUSE_PORT="8123"
 CLICKHOUSE_NATIVE_PORT="9000"
 SCHEMA_FILE="schema.sql"
@@ -40,7 +40,7 @@ else
         echo "To start without ClickHouse, run:"
         echo "  ./zig-out/bin/server --ports <port>"
         echo ""
-        echo "Or disable ClickHouse in config/zerver.yaml"
+        echo "Or disable ClickHouse in config/zails.yaml"
         exit 1
     fi
 
@@ -69,7 +69,7 @@ if [ -f "$SCHEMA_FILE" ]; then
     echo "Initializing ClickHouse schema..."
 
     # Check if database exists
-    DB_EXISTS=$(curl -s "http://localhost:${CLICKHOUSE_PORT}/?query=SHOW+DATABASES" | grep -c "^zerver$" || true)
+    DB_EXISTS=$(curl -s "http://localhost:${CLICKHOUSE_PORT}/?query=SHOW+DATABASES" | grep -c "^zails$" || true)
 
     if [ "$DB_EXISTS" -eq "0" ]; then
         echo "Creating database and tables..."
@@ -90,10 +90,10 @@ echo "HTTP Port: ${CLICKHOUSE_PORT}"
 echo "Native Port: ${CLICKHOUSE_NATIVE_PORT}"
 
 # Show database info
-DB_COUNT=$(curl -s "http://localhost:${CLICKHOUSE_PORT}/?query=SELECT+count()+FROM+system.databases+WHERE+name='zerver'" 2>/dev/null || echo "0")
+DB_COUNT=$(curl -s "http://localhost:${CLICKHOUSE_PORT}/?query=SELECT+count()+FROM+system.databases+WHERE+name='zails'" 2>/dev/null || echo "0")
 if [ "$DB_COUNT" -eq "1" ]; then
-    TABLE_COUNT=$(curl -s "http://localhost:${CLICKHOUSE_PORT}/?query=SELECT+count()+FROM+system.tables+WHERE+database='zerver'" 2>/dev/null || echo "0")
-    echo "Database: zerver (${TABLE_COUNT} tables)"
+    TABLE_COUNT=$(curl -s "http://localhost:${CLICKHOUSE_PORT}/?query=SELECT+count()+FROM+system.tables+WHERE+database='zails'" 2>/dev/null || echo "0")
+    echo "Database: zails (${TABLE_COUNT} tables)"
 else
     echo "Database: Not initialized"
 fi

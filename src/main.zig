@@ -79,7 +79,7 @@ pub fn main() !void {
 
     // Initialize runtime controller for metrics and profiling
     // Create default config for runtime controller
-    var default_config = try config_system.ZerverConfig.default(allocator);
+    var default_config = try config_system.ZailsConfig.default(allocator);
     defer default_config.deinit(allocator);
 
     // ========================================

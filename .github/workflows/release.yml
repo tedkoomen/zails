@@ -65,19 +65,19 @@ jobs:
           cat > Formula/zails.rb << EOF
           class Zails < Formula
             desc "High-performance gRPC Rails-like framework for Zig"
-            homepage "https://github.com/Ted-Koomen/zails"
+            homepage "https://github.com/tedkoomen/zails"
             version "${VERSION}"
 
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/Ted-Koomen/zails/releases/download/v#{version}/zails-aarch64-macos.tar.gz"
+                url "https://github.com/tedkoomen/zails/releases/download/v#{version}/zails-aarch64-macos.tar.gz"
                 sha256 "${SHA_MACOS}"
               end
             end
 
             on_linux do
               if Hardware::CPU.intel?
-                url "https://github.com/Ted-Koomen/zails/releases/download/v#{version}/zails-x86_64-linux.tar.gz"
+                url "https://github.com/tedkoomen/zails/releases/download/v#{version}/zails-x86_64-linux.tar.gz"
                 sha256 "${SHA_LINUX}"
               end
             end

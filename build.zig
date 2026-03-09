@@ -48,28 +48,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Client executable
-    const client_module = b.createModule(.{
-        .root_source_file = b.path("src/client.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const client_exe = b.addExecutable(.{
-        .name = "client",
-        .root_module = client_module,
-    });
-
-    b.installArtifact(client_exe);
-
-    const client_run_cmd = b.addRunArtifact(client_exe);
-    client_run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        client_run_cmd.addArgs(args);
-    }
-
-    const client_run_step = b.step("run-client", "Run the client");
-    client_run_step.dependOn(&client_run_cmd.step);
+    _ = addClientExe(b, "src/client.zig", target, optimize);
 
     // Tests
     const test_module = b.createModule(.{
@@ -92,7 +71,7 @@ pub fn build(b: *std.Build) void {
 
     // Message bus module tests (standalone)
     const message_bus_test_module = b.createModule(.{
-        .root_source_file = b.path("src/test_message_bus.zig"),
+        .root_source_file = b.path("src/message_bus_module_test.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -135,98 +114,78 @@ pub fn build(b: *std.Build) void {
     zails_run_step.dependOn(&zails_run_cmd.step);
 
     // Test harness for load testing
-    const test_harness_module = b.createModule(.{
-        .root_source_file = b.path("src/test_harness.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const test_harness_exe = b.addExecutable(.{
-        .name = "test_harness",
-        .root_module = test_harness_module,
-    });
-
-    b.installArtifact(test_harness_exe);
-
-    const test_harness_run_cmd = b.addRunArtifact(test_harness_exe);
-    test_harness_run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        test_harness_run_cmd.addArgs(args);
-    }
-
-    const test_harness_run_step = b.step("load-test", "Run load tests");
-    test_harness_run_step.dependOn(&test_harness_run_cmd.step);
+    _ = addExeWithRunStep(b, "test_harness", "src/test_harness.zig", "load-test", "Run load tests", target, optimize);
 
     // Heartbeat benchmark
-    const heartbeat_benchmark_module = b.createModule(.{
-        .root_source_file = b.path("src/heartbeat_benchmark.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const heartbeat_benchmark_exe = b.addExecutable(.{
-        .name = "heartbeat_benchmark",
-        .root_module = heartbeat_benchmark_module,
-    });
-
-    b.installArtifact(heartbeat_benchmark_exe);
-
-    const heartbeat_benchmark_run_cmd = b.addRunArtifact(heartbeat_benchmark_exe);
-    heartbeat_benchmark_run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        heartbeat_benchmark_run_cmd.addArgs(args);
-    }
-
-    const heartbeat_benchmark_run_step = b.step("heartbeat-bench", "Run heartbeat performance benchmark");
-    heartbeat_benchmark_run_step.dependOn(&heartbeat_benchmark_run_cmd.step);
+    _ = addExeWithRunStep(b, "heartbeat_benchmark", "src/heartbeat_benchmark.zig", "heartbeat-bench", "Run heartbeat performance benchmark", target, optimize);
 
     // Message Bus Benchmark
-    const message_bus_benchmark_module = b.createModule(.{
-        .root_source_file = b.path("src/message_bus_benchmark.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const message_bus_benchmark_exe = b.addExecutable(.{
-        .name = "message_bus_benchmark",
-        .root_module = message_bus_benchmark_module,
-    });
-
-    b.installArtifact(message_bus_benchmark_exe);
-
-    const message_bus_benchmark_run_cmd = b.addRunArtifact(message_bus_benchmark_exe);
-    message_bus_benchmark_run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        message_bus_benchmark_run_cmd.addArgs(args);
-    }
-
-    const message_bus_benchmark_run_step = b.step("message-bus-bench", "Run message bus benchmark");
-    message_bus_benchmark_run_step.dependOn(&message_bus_benchmark_run_cmd.step);
+    _ = addExeWithRunStep(b, "message_bus_benchmark", "src/message_bus_benchmark.zig", "message-bus-bench", "Run message bus benchmark", target, optimize);
 
     // Integration Test (TCP → Handler → Message Bus → Subscriber)
-    const integration_test_module = b.createModule(.{
-        .root_source_file = b.path("src/integration_test.zig"),
+    _ = addExeWithRunStep(b, "integration_test", "src/integration_test.zig", "integration-test", "Run integration tests", target, optimize);
+
+    // Deterministic Simulation Tests (TigerBeetle-inspired)
+    const sim_test_module = b.createModule(.{
+        .root_source_file = b.path("src/simulation_test.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const integration_test_exe = b.addExecutable(.{
-        .name = "integration_test",
-        .root_module = integration_test_module,
+    const sim_tests = b.addTest(.{
+        .name = "simulation_tests",
+        .root_module = sim_test_module,
     });
 
-    b.installArtifact(integration_test_exe);
+    const run_sim_tests = b.addRunArtifact(sim_tests);
+    const sim_test_step = b.step("test-simulation", "Run deterministic simulation tests");
+    sim_test_step.dependOn(&run_sim_tests.step);
+}
 
-    const integration_test_run_cmd = b.addRunArtifact(integration_test_exe);
-    integration_test_run_cmd.step.dependOn(b.getInstallStep());
+/// Helper to create an executable with an associated run step.
+/// Used for standalone tools/benchmarks that don't need extra module imports.
+fn addExeWithRunStep(
+    b: *std.Build,
+    name: []const u8,
+    source: []const u8,
+    step_name: []const u8,
+    description: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const mod = b.createModule(.{
+        .root_source_file = b.path(source),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = mod,
+    });
+
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
-        integration_test_run_cmd.addArgs(args);
+        run_cmd.addArgs(args);
     }
 
-    const integration_test_run_step = b.step("integration-test", "Run integration tests");
-    integration_test_run_step.dependOn(&integration_test_run_cmd.step);
+    const run_step = b.step(step_name, description);
+    run_step.dependOn(&run_cmd.step);
+
+    return exe;
+}
+
+/// Helper for client executable with run step (same pattern but also used
+/// for the client binary).
+fn addClientExe(
+    b: *std.Build,
+    source: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    return addExeWithRunStep(b, "client", source, "run-client", "Run the client", target, optimize);
 }

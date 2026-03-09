@@ -6,7 +6,6 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const SignalHandler = @import("signals.zig").SignalHandler;
 const numa = @import("numa.zig");
-const threadpool_framework = @import("threadpool_framework.zig");
 const epoll_threadpool = @import("epoll_threadpool.zig");
 const handler_registry = @import("handler_registry.zig");
 const config_system = @import("config_system.zig");
@@ -28,15 +27,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.log.info("=== High-Performance Server Framework ===", .{});
-    std.log.info("Features:", .{});
-    std.log.info("  ✓ Convention-based handlers (handlers/ folder)", .{});
-    std.log.info("  ✓ Comptime dispatch (NO virtual inheritance)", .{});
-    std.log.info("  ✓ Lock-free object pools", .{});
-    std.log.info("  ✓ Lock-free threadpool with work-stealing", .{});
-    std.log.info("  ✓ NUMA-aware worker placement", .{});
-    std.log.info("", .{});
-
     // Parse configuration
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -52,6 +42,17 @@ pub fn main() !void {
 
     try config.validate();
 
+    if (config.verbose) {
+        std.log.info("=== High-Performance Server Framework ===", .{});
+        std.log.info("Features:", .{});
+        std.log.info("  ✓ Convention-based handlers (handlers/ folder)", .{});
+        std.log.info("  ✓ Comptime dispatch (NO virtual inheritance)", .{});
+        std.log.info("  ✓ Lock-free object pools", .{});
+        std.log.info("  ✓ Epoll-based event-driven workers", .{});
+        std.log.info("  ✓ NUMA-aware worker placement", .{});
+        std.log.info("", .{});
+    }
+
     // ========================================
     // Initialize Message Bus (Event-Driven Architecture)
     // ========================================
@@ -65,6 +66,7 @@ pub fn main() !void {
 
     try bus_instance.start();
     globals.global_message_bus = &bus_instance;
+    globals.ctx.message_bus = &bus_instance;
 
     std.log.info("✓ Message bus started (4 workers, 8192 queue capacity)", .{});
     std.log.info("", .{});
@@ -118,6 +120,7 @@ pub fn main() !void {
         feed_manager = try FM.init(allocator, feed_configs, &bus_instance);
         try feed_manager.?.start();
         globals.global_feed_manager = &feed_manager.?;
+        globals.ctx.feed_manager = &feed_manager.?;
         std.log.info("✓ Feed manager started ({} feed(s))", .{feed_configs.len});
     } else {
         std.log.info("Feed manager disabled (no feeds configured)", .{});
@@ -132,10 +135,12 @@ pub fn main() !void {
 
     var runtime_controller = config_system.RuntimeController.init(&default_config);
     globals.global_runtime_controller = &runtime_controller;
+    globals.ctx.runtime_controller = &runtime_controller;
 
     // Initialize metrics registry
     var metrics_registry = metrics_mod.MetricsRegistry.init();
     globals.global_metrics = &metrics_registry;
+    globals.ctx.metrics = &metrics_registry;
 
     // Initialize ClickHouse writer if enabled
     var clickhouse_writer: ?*async_clickhouse.AsyncClickHouseWriter = null;
@@ -184,6 +189,7 @@ pub fn main() !void {
 
         // Initialize global - the writer's background thread ensures visibility
         globals.global_clickhouse = clickhouse_writer;
+        globals.ctx.clickhouse = clickhouse_writer;
         std.log.info("ClickHouse writer initialized (host={s}, port={d}, database={s})", .{
             host,
             port,
@@ -334,14 +340,16 @@ pub fn main() !void {
     var signal_handler = SignalHandler.init(&shutdown);
     signal_handler.register();
 
-    std.log.info("", .{});
-    std.log.info("=== Server Running ===", .{});
-    std.log.info("Processing requests with:", .{});
-    std.log.info("  • Zero allocations in hot path (arena allocators)", .{});
-    std.log.info("  • Optimized syscalls (epoll)", .{});
-    std.log.info("  • Zero virtual inheritance (comptime dispatch)", .{});
-    std.log.info("Press Ctrl+C to shutdown", .{});
-    std.log.info("", .{});
+    std.log.info("Server started on {} port(s)", .{config.ports.len});
+
+    if (config.verbose) {
+        std.log.info("=== Server Running ===", .{});
+        std.log.info("Processing requests with:", .{});
+        std.log.info("  • Zero allocations in hot path (arena allocators)", .{});
+        std.log.info("  • Optimized syscalls (epoll)", .{});
+        std.log.info("  • Zero virtual inheritance (comptime dispatch)", .{});
+        std.log.info("Press Ctrl+C to shutdown", .{});
+    }
 
     // Create epoll for efficient multi-listener accept
     const epoll_fd = try std.posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);

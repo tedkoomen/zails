@@ -19,9 +19,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const message_bus = @import("message_bus/mod.zig");
-const Event = @import("event.zig").Event;
-const generateEventId = @import("event.zig").generateEventId;
+const message_bus = @import("../message_bus/mod.zig");
+const Event = @import("../event.zig").Event;
+const generateEventId = @import("../event.zig").generateEventId;
 
 /// Field type enum
 pub const FieldType = enum {
@@ -260,7 +260,7 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
                     .data = json,
                 };
 
-                b.publish(event);
+                _ = b.publish(event);
             }
         }
 

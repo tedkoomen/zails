@@ -4,7 +4,7 @@
 // the module root to be src/ (not src/message_bus/).
 //
 // Run with: zig build test-message-bus
-//       or: zig test src/test_message_bus.zig
+//       or: zig test src/message_bus_module_test.zig
 
 test {
     _ = @import("message_bus/mod.zig");

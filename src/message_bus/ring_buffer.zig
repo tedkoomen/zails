@@ -2,20 +2,53 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Event = @import("../event.zig").Event;
 
+/// MPMC-safe ring buffer using per-slot sequence numbers (Vyukov pattern).
+///
+/// Each slot carries a sequence number that coordinates producers and consumers:
+///   - Producer: CAS head to claim index, write event, publish via sequence store
+///   - Consumer: CAS tail to claim index, spin until sequence is ready, read event
+///
+/// This eliminates the torn-read race where a consumer observes an advanced head
+/// but reads a slot before the producer finishes writing.
 pub const EventRingBuffer = struct {
     const Self = @This();
 
+    const Slot = struct {
+        event: Event,
+        sequence: std.atomic.Value(usize),
+    };
+
     capacity: usize,
-    items: []Event,
-    head: std.atomic.Value(usize), // Producer position
-    tail: std.atomic.Value(usize), // Consumer position
+    mask: usize,
+    slots: []Slot,
+    head: std.atomic.Value(usize), // Producer claim position
+    tail: std.atomic.Value(usize), // Consumer claim position
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, capacity: usize) !Self {
-        const items = try allocator.alloc(Event, capacity);
+        // Round up to power of 2 for mask-based indexing
+        const actual_capacity = blk: {
+            if (capacity == 0) break :blk 1;
+            var n = capacity - 1;
+            n |= n >> 1;
+            n |= n >> 2;
+            n |= n >> 4;
+            n |= n >> 8;
+            n |= n >> 16;
+            if (@sizeOf(usize) > 4) n |= n >> 32;
+            break :blk n + 1;
+        };
+
+        const slots = try allocator.alloc(Slot, actual_capacity);
+        for (slots, 0..) |*slot, i| {
+            slot.sequence = std.atomic.Value(usize).init(i);
+            slot.event = undefined;
+        }
+
         return Self{
-            .capacity = capacity,
-            .items = items,
+            .capacity = actual_capacity,
+            .mask = actual_capacity - 1,
+            .slots = slots,
             .head = std.atomic.Value(usize).init(0),
             .tail = std.atomic.Value(usize).init(0),
             .allocator = allocator,
@@ -23,78 +56,81 @@ pub const EventRingBuffer = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.allocator.free(self.items);
+        self.allocator.free(self.slots);
     }
 
-    /// Non-blocking push (returns false if full)
-    /// Thread-safe for multiple producers via CAS loop
+    /// Non-blocking push (returns false if full).
+    /// Thread-safe for multiple concurrent producers.
     pub fn push(self: *Self, event: Event) bool {
+        var head = self.head.load(.monotonic);
         while (true) {
-            const head = self.head.load(.acquire);
-            const next_head = (head + 1) % self.capacity;
-            const tail = self.tail.load(.acquire);
+            const slot = &self.slots[head & self.mask];
+            const seq = slot.sequence.load(.acquire);
+            const diff = @as(isize, @intCast(seq)) - @as(isize, @intCast(head));
 
-            if (next_head == tail) {
-                return false; // Buffer full
+            if (diff == 0) {
+                // Slot is available for writing — try to claim it
+                if (self.head.cmpxchgWeak(head, head + 1, .monotonic, .monotonic)) |updated| {
+                    head = updated;
+                    continue;
+                }
+                // Claimed. Write the event, then publish by advancing the sequence.
+                slot.event = event;
+                slot.sequence.store(head + 1, .release);
+                return true;
+            } else if (diff < 0) {
+                // Slot still occupied by a consumer — buffer is full
+                return false;
+            } else {
+                // Another producer claimed this slot — reload head and retry
+                head = self.head.load(.monotonic);
             }
-
-            // CAS to claim this slot
-            if (self.head.cmpxchgWeak(head, next_head, .acq_rel, .acquire)) |_| {
-                // Another producer claimed this slot, retry
-                continue;
-            }
-
-            // We own the slot at `head` — write the event
-            self.items[head] = event;
-            return true;
         }
     }
 
-    /// Pop from consumer side (returns null if empty)
-    /// Thread-safe for multiple consumers via CAS loop
+    /// Non-blocking pop (returns null if empty).
+    /// Thread-safe for multiple concurrent consumers.
     pub fn pop(self: *Self) ?Event {
+        var tail = self.tail.load(.monotonic);
         while (true) {
-            const tail = self.tail.load(.acquire);
-            const head = self.head.load(.acquire);
+            const slot = &self.slots[tail & self.mask];
+            const seq = slot.sequence.load(.acquire);
+            const diff = @as(isize, @intCast(seq)) - @as(isize, @intCast(tail + 1));
 
-            if (tail == head) {
-                return null; // Buffer empty
+            if (diff == 0) {
+                // Slot is ready for reading — try to claim it
+                if (self.tail.cmpxchgWeak(tail, tail + 1, .monotonic, .monotonic)) |updated| {
+                    tail = updated;
+                    continue;
+                }
+                // Claimed. Read the event, then release the slot for producers.
+                const event = slot.event;
+                slot.sequence.store(tail + self.capacity, .release);
+                return event;
+            } else if (diff < 0) {
+                // No data available — buffer is empty
+                return null;
+            } else {
+                // Another consumer claimed this slot — reload tail and retry
+                tail = self.tail.load(.monotonic);
             }
-
-            const event = self.items[tail];
-            const next_tail = (tail + 1) % self.capacity;
-
-            // CAS to claim this slot for consumption
-            if (self.tail.cmpxchgWeak(tail, next_tail, .acq_rel, .acquire)) |_| {
-                // Another consumer claimed this slot, retry
-                continue;
-            }
-
-            return event;
         }
     }
 
     pub fn size(self: *const Self) usize {
         const head = self.head.load(.acquire);
         const tail = self.tail.load(.acquire);
-        if (head >= tail) {
-            return head - tail;
-        } else {
-            return self.capacity - (tail - head);
-        }
+        return head -| tail;
     }
 
     pub fn isEmpty(self: *const Self) bool {
-        const head = self.head.load(.acquire);
-        const tail = self.tail.load(.acquire);
-        return head == tail;
+        return self.size() == 0;
     }
 
     pub fn isFull(self: *const Self) bool {
         const head = self.head.load(.acquire);
-        const next_head = (head + 1) % self.capacity;
         const tail = self.tail.load(.acquire);
-        return next_head == tail;
+        return (head - tail) >= self.capacity;
     }
 };
 
@@ -156,11 +192,151 @@ test "ring buffer full" {
         .data = "{}",
     };
 
-    // Fill buffer (capacity - 1 because of ring buffer design)
+    // Fill buffer (all 4 slots in power-of-2 ring buffer)
+    try std.testing.expect(buffer.push(event));
     try std.testing.expect(buffer.push(event));
     try std.testing.expect(buffer.push(event));
     try std.testing.expect(buffer.push(event));
 
     // Next push should fail (buffer full)
     try std.testing.expect(!buffer.push(event));
+}
+
+test "ring buffer wrap around" {
+    const allocator = std.testing.allocator;
+
+    var buffer = try EventRingBuffer.init(allocator, 4);
+    defer buffer.deinit();
+
+    // Fill and drain multiple times to test wrap-around
+    for (0..3) |round| {
+        for (0..4) |i| {
+            const event = Event{
+                .id = @intCast(round * 4 + i),
+                .timestamp = @intCast(round * 4 + i),
+                .event_type = .model_created,
+                .topic = "Test.created",
+                .model_type = "Test",
+                .model_id = @intCast(round * 4 + i),
+                .data = "{}",
+            };
+            try std.testing.expect(buffer.push(event));
+        }
+
+        for (0..4) |i| {
+            const popped = buffer.pop().?;
+            try std.testing.expectEqual(@as(u128, @intCast(round * 4 + i)), popped.id);
+        }
+
+        try std.testing.expect(buffer.pop() == null);
+    }
+}
+
+test "ring buffer MPMC correctness - no torn reads" {
+    const allocator = std.testing.allocator;
+
+    var buffer = try EventRingBuffer.init(allocator, 256);
+    defer buffer.deinit();
+
+    const num_producers = 4;
+    const num_consumers = 4;
+    const events_per_producer = 10_000;
+
+    var shutdown = std.atomic.Value(bool).init(false);
+    var total_produced = std.atomic.Value(u64).init(0);
+    var total_consumed = std.atomic.Value(u64).init(0);
+    var torn_reads = std.atomic.Value(u64).init(0);
+
+    const ProducerCtx = struct {
+        buffer: *EventRingBuffer,
+        producer_id: usize,
+        total_produced: *std.atomic.Value(u64),
+    };
+
+    const ConsumerCtx = struct {
+        buffer: *EventRingBuffer,
+        shutdown: *std.atomic.Value(bool),
+        total_consumed: *std.atomic.Value(u64),
+        torn_reads: *std.atomic.Value(u64),
+        expected_total: u64,
+    };
+
+    const producer_fn = struct {
+        fn run(ctx: ProducerCtx) void {
+            for (0..events_per_producer) |i| {
+                const seq: u64 = ctx.producer_id * events_per_producer + i;
+                const event = Event{
+                    .id = seq,
+                    .timestamp = @intCast(seq),
+                    .event_type = .model_created,
+                    .topic = "test",
+                    .model_type = "test",
+                    .model_id = seq,
+                    .data = "{}",
+                };
+                while (!ctx.buffer.push(event)) {
+                    std.atomic.spinLoopHint();
+                }
+                _ = ctx.total_produced.fetchAdd(1, .monotonic);
+            }
+        }
+    }.run;
+
+    const consumer_fn = struct {
+        fn run(ctx: ConsumerCtx) void {
+            while (true) {
+                const consumed = ctx.total_consumed.load(.monotonic);
+                if (consumed >= ctx.expected_total and ctx.shutdown.load(.acquire)) break;
+
+                const event = ctx.buffer.pop() orelse {
+                    if (ctx.shutdown.load(.acquire) and ctx.total_consumed.load(.monotonic) >= ctx.expected_total) break;
+                    std.atomic.spinLoopHint();
+                    continue;
+                };
+
+                // A torn read will have mismatched id vs model_id
+                if (event.id != event.model_id) {
+                    _ = ctx.torn_reads.fetchAdd(1, .monotonic);
+                }
+                if (event.timestamp != @as(i64, @intCast(event.model_id))) {
+                    _ = ctx.torn_reads.fetchAdd(1, .monotonic);
+                }
+
+                _ = ctx.total_consumed.fetchAdd(1, .monotonic);
+            }
+        }
+    }.run;
+
+    const expected_total: u64 = num_producers * events_per_producer;
+
+    var consumer_threads: [num_consumers]std.Thread = undefined;
+    var consumer_ctxs: [num_consumers]ConsumerCtx = undefined;
+    for (0..num_consumers) |i| {
+        consumer_ctxs[i] = .{
+            .buffer = &buffer,
+            .shutdown = &shutdown,
+            .total_consumed = &total_consumed,
+            .torn_reads = &torn_reads,
+            .expected_total = expected_total,
+        };
+        consumer_threads[i] = try std.Thread.spawn(.{}, consumer_fn, .{consumer_ctxs[i]});
+    }
+
+    var producer_threads: [num_producers]std.Thread = undefined;
+    var producer_ctxs: [num_producers]ProducerCtx = undefined;
+    for (0..num_producers) |i| {
+        producer_ctxs[i] = .{ .buffer = &buffer, .producer_id = i, .total_produced = &total_produced };
+        producer_threads[i] = try std.Thread.spawn(.{}, producer_fn, .{producer_ctxs[i]});
+    }
+
+    for (producer_threads) |t| t.join();
+    shutdown.store(true, .release);
+    for (consumer_threads) |t| t.join();
+
+    const torn = torn_reads.load(.monotonic);
+    const consumed = total_consumed.load(.monotonic);
+
+    // All events consumed with zero torn reads
+    try std.testing.expectEqual(@as(u64, 0), torn);
+    try std.testing.expectEqual(expected_total, consumed);
 }

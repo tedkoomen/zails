@@ -93,9 +93,12 @@ pub const MessageBus = struct {
         std.log.info("MessageBus started with {} workers", .{self.workers.len});
     }
 
-    pub fn publish(self: *Self, event: Event) void {
+    /// Publish an event to the bus. Returns true on success, false if dropped (queue full).
+    /// On drop, owned event data is freed automatically.
+    pub fn publish(self: *Self, event: Event) bool {
         if (self.event_queue.push(event)) {
             _ = self.total_published.fetchAdd(1, .monotonic);
+            return true;
         } else {
             // Free owned event data to prevent memory leak
             event.deinit(self.allocator);
@@ -103,6 +106,7 @@ pub const MessageBus = struct {
             if (dropped % 1000 == 0) {
                 std.log.warn("Event queue full - dropped {} total events", .{dropped + 1});
             }
+            return false;
         }
     }
 
@@ -189,28 +193,31 @@ test "message bus queue overflow" {
     const allocator = std.testing.allocator;
 
     var bus = try MessageBus.init(allocator, .{
-        .queue_capacity = 4, // Very small queue
+        .queue_capacity = 4, // Small queue (4 slots with Vyukov MPMC)
         .worker_count = 1,
     });
     defer bus.deinit();
 
-    // Use owned events
+    // Use owned events — fill all 4 slots
     const event1 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 1, "{}");
     const event2 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 2, "{}");
     const event3 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 3, "{}");
     const event4 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 4, "{}");
+    const event5 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 5, "{}");
 
     bus.publish(event1);
     bus.publish(event2);
     bus.publish(event3);
+    bus.publish(event4);
 
     const stats1 = bus.getStats();
-    try std.testing.expectEqual(@as(u64, 3), stats1.published);
+    try std.testing.expectEqual(@as(u64, 4), stats1.published);
 
-    bus.publish(event4);
+    // 5th event should be dropped (queue full)
+    bus.publish(event5);
 
     const stats2 = bus.getStats();
     try std.testing.expectEqual(@as(u64, 1), stats2.dropped);
 
-    // event4 is automatically freed by publish() when dropped
+    // event5 is automatically freed by publish() when dropped
 }

@@ -17,7 +17,6 @@ const embedded_server_files = [_]EmbeddedFile{
     .{ .name = "pool_lockfree.zig", .content = @embedFile("pool_lockfree.zig") },
     .{ .name = "handler_registry.zig", .content = @embedFile("handler_registry.zig") },
     .{ .name = "server_framework.zig", .content = @embedFile("server_framework.zig") },
-    .{ .name = "threadpool_framework.zig", .content = @embedFile("threadpool_framework.zig") },
     .{ .name = "client.zig", .content = @embedFile("client.zig") },
     .{ .name = "tls_openssl.zig", .content = @embedFile("tls_openssl.zig") },
     .{ .name = "result.zig", .content = @embedFile("result.zig") },
@@ -396,7 +395,7 @@ fn createMainZig(project_dir: fs.Dir) !void {
         \\const Config = @import("../server/config.zig").Config;
         \\const SignalHandler = @import("../server/signals.zig").SignalHandler;
         \\const numa = @import("../server/numa.zig");
-        \\const threadpool_framework = @import("../server/threadpool_framework.zig");
+        \\const epoll_threadpool = @import("../server/epoll_threadpool.zig");
         \\const handler_registry = @import("../server/handler_registry.zig");
         \\const net = std.net;
         \\
@@ -458,19 +457,23 @@ fn createMainZig(project_dir: fs.Dir) !void {
         \\        workers_per_node,
         \\    });
         \\
-        \\    // Create lock-free thread pools (one per NUMA node)
+        \\    // Connection tracking
+        \\    var active_connections = std.atomic.Value(usize).init(0);
+        \\
+        \\    // Create event-driven epoll thread pools (one per NUMA node)
         \\    var thread_pools = try allocator.alloc(
-        \\        threadpool_framework.LockFreeThreadPool,
+        \\        epoll_threadpool.EpollThreadPool,
         \\        topology.nodes.len,
         \\    );
         \\    defer allocator.free(thread_pools);
         \\
         \\    for (topology.nodes, 0..) |node, i| {
-        \\        thread_pools[i] = try threadpool_framework.LockFreeThreadPool.init(
+        \\        thread_pools[i] = try epoll_threadpool.EpollThreadPool.init(
         \\            allocator,
         \\            node,
         \\            workers_per_node,
         \\            &registry,
+        \\            &active_connections,
         \\        );
         \\    }
         \\
@@ -518,10 +521,10 @@ fn createMainZig(project_dir: fs.Dir) !void {
         \\        for (listeners, 0..) |*listener, i| {
         \\            const connection = listener.accept() catch continue;
         \\
-        \\            // Route to NUMA-local threadpool
+        \\            // Route to NUMA-local threadpool (epoll-based)
         \\            const node_idx = i % topology.nodes.len;
         \\            thread_pools[node_idx].spawn(connection) catch |err| {
-        \\                std.log.err("Failed to enqueue connection: {}", .{err});
+        \\                std.log.err("Failed to add connection to epoll: {}", .{err});
         \\                connection.stream.close();
         \\                continue;
         \\            };

@@ -6,7 +6,19 @@ const Subscription = @import("subscriber.zig").Subscription;
 // Forward declaration - MessageBus will be available at runtime
 pub const MessageBus = @import("message_bus.zig").MessageBus;
 
-/// Background worker for event delivery
+/// Background worker for event delivery.
+///
+/// Each worker pops events from the shared ring buffer and delivers
+/// them to matching subscribers sequentially. Sequential delivery
+/// avoids the overhead of spawning an OS thread per subscriber per
+/// event (~10-50µs per spawn), which dominates at high throughput.
+///
+/// Uses adaptive polling: busy-spins briefly (1µs), then backs off
+/// to short sleeps (100µs). No 100ms sleep — worst-case wake latency
+/// is ~100µs, not 100ms.
+///
+/// Handlers are expected to be fast callbacks. If a handler needs to
+/// do expensive work, it should enqueue the work elsewhere.
 pub const EventWorker = struct {
     const Self = @This();
 
@@ -20,20 +32,23 @@ pub const EventWorker = struct {
             .id = id,
             .message_bus = message_bus,
             .config = config,
-            .cpu_id = null, // Will be set when worker is started
+            .cpu_id = null,
         };
     }
 
     /// Set CPU affinity for this worker thread
-    /// NOTE: CPU affinity requires syscall interface that varies by Zig version.
-    /// For production use, implement via C binding or libc.
     fn setCpuAffinity(self: *Self) void {
         const total_cpus = std.Thread.getCpuCount() catch 4;
         const message_bus_cpu_start = @min(2, total_cpus / 2);
         self.cpu_id = message_bus_cpu_start + (self.id % (total_cpus - message_bus_cpu_start));
 
-        std.log.info("EventWorker {}: would pin to CPU {} (affinity disabled)", .{self.id, self.cpu_id.?});
+        std.log.info("EventWorker {}: would pin to CPU {} (affinity disabled)", .{ self.id, self.cpu_id.? });
     }
+
+    /// Adaptive backoff: spin briefly, then short sleep.
+    /// Max wake latency: ~100µs (vs 100ms before).
+    const SPIN_ITERATIONS = 64;
+    const BACKOFF_SLEEP_NS = 100_000; // 100µs
 
     pub fn run(self: *Self) void {
         const allocator = self.message_bus.allocator;
@@ -41,100 +56,39 @@ pub const EventWorker = struct {
         // Set CPU affinity to isolate from TCP workers
         self.setCpuAffinity();
 
-        std.log.info("EventWorker {} started on CPU {?}", .{self.id, self.cpu_id});
+        std.log.info("EventWorker {} started on CPU {?}", .{ self.id, self.cpu_id });
+
+        var empty_spins: u32 = 0;
 
         while (!self.message_bus.shutdown.load(.acquire)) {
             // Pop event from queue
             const event = self.message_bus.event_queue.pop() orelse {
-                // Queue empty - sleep briefly
-                std.Thread.sleep(self.config.flush_interval_ms * std.time.ns_per_ms);
+                // Adaptive backoff: spin briefly, then sleep 100µs
+                empty_spins +|= 1;
+                if (empty_spins < SPIN_ITERATIONS) {
+                    std.atomic.spinLoopHint();
+                } else {
+                    std.Thread.sleep(BACKOFF_SLEEP_NS);
+                }
                 continue;
             };
 
-            const subscribers = self.message_bus.subscribers.getMatching(&event, allocator) catch |err| {
-                std.log.err("Worker {}: Failed to get subscribers: {}", .{ self.id, err });
-                event.deinit(allocator);
-                continue;
-            };
-            defer allocator.free(subscribers);
+            // Reset spin counter on successful pop
+            empty_spins = 0;
 
-            self.deliverParallel(&event, subscribers, allocator);
+            // Zero-allocation matching via stack result
+            const match_result = self.message_bus.subscribers.getMatchingResult(&event);
+            const subscribers = match_result.slice();
 
-            std.log.debug("Worker {}: Event delivered - topic={s} subscribers={d}", .{
-                self.id,
-                event.topic,
-                subscribers.len,
-            });
+            // Sequential delivery — fast callbacks, no thread spawn overhead
+            for (subscribers) |sub| {
+                sub.handler(&event, allocator);
+                _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
+            }
 
             event.deinit(allocator);
         }
 
         std.log.info("EventWorker {} stopped", .{self.id});
-    }
-
-    const HandlerContext = struct {
-        worker_id: usize,
-        event: *const Event,
-        subscription: *const Subscription,
-        allocator: Allocator,
-        message_bus: *MessageBus,
-    };
-
-    fn handlerThreadFn(context: HandlerContext) void {
-        context.subscription.handler(context.event, context.allocator);
-        _ = context.message_bus.total_delivered.fetchAdd(1, .monotonic);
-
-        std.log.debug("Worker {}: Delivered to subscription {d} [parallel]", .{
-            context.worker_id,
-            context.subscription.id,
-        });
-    }
-
-    fn deliverParallel(
-        self: *Self,
-        event: *const Event,
-        subscribers: []const Subscription,
-        allocator: Allocator,
-    ) void {
-        if (subscribers.len == 0) return;
-
-        if (subscribers.len == 1) {
-            subscribers[0].handler(event, allocator);
-            _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
-            return;
-        }
-
-        const threads = allocator.alloc(std.Thread, subscribers.len) catch {
-            std.log.err("Worker {}: Failed to allocate threads, falling back to sequential", .{self.id});
-            for (subscribers) |sub| {
-                sub.handler(event, allocator);
-                _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
-            }
-            return;
-        };
-        defer allocator.free(threads);
-
-        var spawned_count: usize = 0;
-        for (subscribers) |*sub| {
-            const context = HandlerContext{
-                .worker_id = self.id,
-                .event = event,
-                .subscription = sub,
-                .allocator = allocator,
-                .message_bus = self.message_bus,
-            };
-
-            threads[spawned_count] = std.Thread.spawn(.{}, handlerThreadFn, .{context}) catch {
-                std.log.err("Worker {}: Failed to spawn handler thread, executing inline", .{self.id});
-                sub.handler(event, allocator);
-                _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
-                continue;
-            };
-            spawned_count += 1;
-        }
-
-        for (threads[0..spawned_count]) |thread| {
-            thread.join();
-        }
     }
 };

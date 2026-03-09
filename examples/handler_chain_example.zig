@@ -12,7 +12,7 @@
 const std = @import("std");
 const message_bus = @import("../src/message_bus/mod.zig");
 const Event = @import("../src/event.zig").Event;
-const ReactiveModelWithHandlers = @import("../src/model_handler_integration.zig").ReactiveModelWithHandlers;
+const ReactiveModelWithHandlers = @import("../src/experimental/model_handler_integration.zig").ReactiveModelWithHandlers;
 
 // ============================================================================
 // Step 1: Define Models with Event Publishing

@@ -5,14 +5,16 @@ const proto = @import("proto.zig");
 /// Maximum number of typed fields per event for filtering
 pub const MAX_EVENT_FIELDS = 8;
 
-/// Stack-allocated fixed-size string for field values (no heap allocation)
+/// Stack-allocated fixed-size string for field values (no heap allocation).
+/// 32 bytes — fits symbols ("AAPL"), statuses ("active"), short identifiers.
+/// Keeps Event struct under 4 cache lines.
 pub const FixedString = struct {
-    buf: [64]u8 = undefined,
+    buf: [32]u8 = undefined,
     len: u8 = 0,
 
     pub fn init(s: []const u8) FixedString {
         var fs = FixedString{};
-        const copy_len: u8 = @intCast(@min(s.len, 64));
+        const copy_len: u8 = @intCast(@min(s.len, 32));
         @memcpy(fs.buf[0..copy_len], s[0..copy_len]);
         fs.len = copy_len;
         return fs;

@@ -74,8 +74,9 @@ pub const EpollWorker = struct {
     requests_processed: std.atomic.Value(u64),
     active_connections: ?*std.atomic.Value(usize),
 
-    const MAX_EVENTS = 256;  // Optimal batch size for cache efficiency
+    const MAX_EVENTS = 256; // Optimal batch size for cache efficiency
     const CONNECTION_TIMEOUT_MS = 30_000;
+    const CLEANUP_INTERVAL_MS = 1_000; // Time-based cleanup every 1s
     const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
     pub fn init(
@@ -147,6 +148,7 @@ pub const EpollWorker = struct {
 
         var events: [MAX_EVENTS]linux.epoll_event = undefined;
         var last_batch_full = false;
+        var last_cleanup_time = std.time.milliTimestamp();
 
         while (!self.shutdown.load(.acquire)) {
             // Adaptive polling: use 0 timeout if last batch was full (more events likely ready)
@@ -168,9 +170,11 @@ pub const EpollWorker = struct {
                 }
             }
 
-            // Timeout check every N iterations
-            if (@rem(self.requests_processed.load(.monotonic), 1000) == 0) {
+            // Time-based stale connection cleanup (every CLEANUP_INTERVAL_MS)
+            const now = std.time.milliTimestamp();
+            if (now - last_cleanup_time >= CLEANUP_INTERVAL_MS) {
                 self.cleanupStaleConnections();
+                last_cleanup_time = now;
             }
         }
 
@@ -249,35 +253,51 @@ pub const EpollWorker = struct {
                         return error.HandlerFailed;
                     };
 
-                    // Prepare response header
+                    // Prepare response header (in-place before write_buffer)
                     var header: [5]u8 = undefined;
                     header[0] = conn.msg_type;
                     std.mem.writeInt(u32, header[1..5], @as(u32, @intCast(response.len)), .big);
 
-                    // Enable TCP_CORK to batch writes (disable Nagle temporarily)
-                    const cork_on: c_int = 1;
-                    _ = std.posix.setsockopt(
-                        conn.fd,
-                        std.posix.IPPROTO.TCP,
-                        linux.TCP.CORK,
-                        &std.mem.toBytes(cork_on),
-                    ) catch {};
-
-                    // Use writev to combine header + response in single syscall
-                    var iov = [_]std.posix.iovec_const{
+                    // Use writev for scatter-gather write: header + payload in ONE syscall.
+                    // Eliminates 2 setsockopt(TCP_CORK) calls per request (~1-2µs saved).
+                    var iov = [2]std.posix.iovec_const{
                         .{ .base = &header, .len = 5 },
                         .{ .base = response.ptr, .len = response.len },
                     };
-                    _ = try std.posix.writev(conn.fd, &iov);
 
-                    // Disable TCP_CORK to flush immediately
-                    const cork_off: c_int = 0;
-                    _ = std.posix.setsockopt(
-                        conn.fd,
-                        std.posix.IPPROTO.TCP,
-                        linux.TCP.CORK,
-                        &std.mem.toBytes(cork_off),
-                    ) catch {};
+                    const total_write_len = 5 + response.len;
+                    var total_written: usize = 0;
+
+                    while (total_written < total_write_len) {
+                        const rc = std.os.linux.writev(conn.fd, &iov, 2);
+                        const n = switch (std.posix.errno(rc)) {
+                            .SUCCESS => rc,
+                            .AGAIN => {
+                                // Socket buffer full — brief spin, then retry.
+                                // TODO: For production, register EPOLLOUT and yield.
+                                std.atomic.spinLoopHint();
+                                continue;
+                            },
+                            else => return error.WriteFailed,
+                        };
+
+                        if (n == 0) return error.ConnectionClosed;
+                        total_written += n;
+
+                        // Advance iov past already-written bytes
+                        var remaining = n;
+                        for (&iov) |*v| {
+                            if (remaining >= v.len) {
+                                remaining -= v.len;
+                                v.base += v.len;
+                                v.len = 0;
+                            } else {
+                                v.base += remaining;
+                                v.len -= remaining;
+                                break;
+                            }
+                        }
+                    }
 
                     _ = self.requests_processed.fetchAdd(1, .monotonic);
 

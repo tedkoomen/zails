@@ -15,8 +15,16 @@ pub const Subscription = struct {
     topic_pattern: topic_matcher.TopicPattern = .any, // Computed at subscribe time
 
     /// Match using pre-computed hash-based topic pattern (O(1)).
-    /// Falls back to string match only if topic_pattern is .any (legacy subscriptions).
+    /// Falls back to string match if topic_pattern is .any and topic isn't "*",
+    /// which means the pattern was never computed (e.g. test-constructed subscriptions
+    /// or legacy code). True .any (topic == "*") matches everything.
     pub fn matchesTopic(self: *const Subscription, event_topic: []const u8) bool {
+        // If topic_pattern is .any but the topic string isn't "*", the pattern
+        // was never computed — fall through to string matching.
+        if (self.topic_pattern == .any and !std.mem.eql(u8, self.topic, "*")) {
+            return self.matchesTopicString(event_topic);
+        }
+
         // Use hash-based O(1) matching via pre-computed topic pattern
         const event_id = topic_matcher.TopicRegistry.get(event_topic);
         if (event_id != 0) {

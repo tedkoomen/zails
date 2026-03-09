@@ -109,14 +109,16 @@ pub const Filter = struct {
             .in => {
                 var it = std.mem.splitScalar(u8, expected, ',');
                 while (it.next()) |item| {
-                    if (std.mem.eql(u8, value, item)) return true;
+                    const trimmed = std.mem.trim(u8, item, " ");
+                    if (std.mem.eql(u8, value, trimmed)) return true;
                 }
                 return false;
             },
             .not_in => {
                 var it = std.mem.splitScalar(u8, expected, ',');
                 while (it.next()) |item| {
-                    if (std.mem.eql(u8, value, item)) return false;
+                    const trimmed = std.mem.trim(u8, item, " ");
+                    if (std.mem.eql(u8, value, trimmed)) return false;
                 }
                 return true;
             },
@@ -158,6 +160,18 @@ pub const Filter = struct {
         };
     }
 
+    /// Approximate float equality using combined absolute + relative tolerance.
+    /// No heap allocation — pure stack arithmetic.
+    const float_abs_epsilon: f64 = 1e-9;
+    const float_rel_epsilon: f64 = 1e-9;
+
+    fn floatApproxEqual(a: f64, b: f64) bool {
+        const diff = @abs(a - b);
+        if (diff <= float_abs_epsilon) return true;
+        const largest = @max(@abs(a), @abs(b));
+        return diff <= largest * float_rel_epsilon;
+    }
+
     fn evaluateFloatCondition(value: f64, condition: *const WhereClause) bool {
         const expected_float = switch (condition.parsed) {
             .float_val => |v| v,
@@ -166,8 +180,8 @@ pub const Filter = struct {
             else => return false,
         };
         return switch (condition.op) {
-            .eq => value == expected_float,
-            .ne => value != expected_float,
+            .eq => floatApproxEqual(value, expected_float),
+            .ne => !floatApproxEqual(value, expected_float),
             .gt => value > expected_float,
             .gte => value >= expected_float,
             .lt => value < expected_float,
@@ -366,4 +380,91 @@ test "filter float comparison" {
 
     event.setField("ratio", .{ .float = 1.0 });
     try std.testing.expect(!filter.matches(&event));
+}
+
+test "filter float equality with epsilon" {
+    const filter = Filter{
+        .conditions = &.{
+            .{ .field = "price", .op = .eq, .value = "0.3" },
+        },
+    };
+
+    var event = Event{
+        .id = 1, .timestamp = 100, .event_type = .model_created,
+        .topic = "Trade.created", .model_type = "Trade", .model_id = 1, .data = "",
+    };
+
+    // 0.1 + 0.2 is not bitwise-equal to 0.3, but should match with epsilon
+    event.setField("price", .{ .float = 0.1 + 0.2 });
+    try std.testing.expect(filter.matches(&event));
+
+    // Exact 0.3 should also match
+    event.setField("price", .{ .float = 0.3 });
+    try std.testing.expect(filter.matches(&event));
+
+    // A clearly different value should not match
+    event.setField("price", .{ .float = 0.5 });
+    try std.testing.expect(!filter.matches(&event));
+}
+
+test "filter float ne with epsilon" {
+    const filter = Filter{
+        .conditions = &.{
+            .{ .field = "price", .op = .ne, .value = "0.3" },
+        },
+    };
+
+    var event = Event{
+        .id = 1, .timestamp = 100, .event_type = .model_created,
+        .topic = "Trade.created", .model_type = "Trade", .model_id = 1, .data = "",
+    };
+
+    // 0.1 + 0.2 ~= 0.3, so .ne should return false
+    event.setField("price", .{ .float = 0.1 + 0.2 });
+    try std.testing.expect(!filter.matches(&event));
+
+    // 0.5 != 0.3, so .ne should return true
+    event.setField("price", .{ .float = 0.5 });
+    try std.testing.expect(filter.matches(&event));
+}
+
+test "filter in operator trims whitespace" {
+    const filter = Filter{
+        .conditions = &.{
+            .{ .field = "symbol", .op = .in, .value = "AAPL, GOOG, MSFT" },
+        },
+    };
+
+    var event = Event{
+        .id = 1, .timestamp = 100, .event_type = .model_created,
+        .topic = "Trade.created", .model_type = "Trade", .model_id = 1, .data = "",
+    };
+
+    event.setField("symbol", .{ .string = FixedString.init("GOOG") });
+    try std.testing.expect(filter.matches(&event));
+
+    event.setField("symbol", .{ .string = FixedString.init("AAPL") });
+    try std.testing.expect(filter.matches(&event));
+
+    event.setField("symbol", .{ .string = FixedString.init("TSLA") });
+    try std.testing.expect(!filter.matches(&event));
+}
+
+test "filter not_in operator trims whitespace" {
+    const filter = Filter{
+        .conditions = &.{
+            .{ .field = "symbol", .op = .not_in, .value = "AAPL, GOOG" },
+        },
+    };
+
+    var event = Event{
+        .id = 1, .timestamp = 100, .event_type = .model_created,
+        .topic = "Trade.created", .model_type = "Trade", .model_id = 1, .data = "",
+    };
+
+    event.setField("symbol", .{ .string = FixedString.init("GOOG") });
+    try std.testing.expect(!filter.matches(&event));
+
+    event.setField("symbol", .{ .string = FixedString.init("MSFT") });
+    try std.testing.expect(filter.matches(&event));
 }

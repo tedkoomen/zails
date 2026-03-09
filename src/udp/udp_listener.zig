@@ -207,27 +207,23 @@ pub fn UdpListener(comptime Protocols: anytype) type {
                 return;
             };
 
-            // Only dupe the data payload — topic and model_type are stable references
-            const data_copy = self.allocator.dupe(u8, json) catch {
+            // Create a fully-owned event so the bus can free it on drop or after delivery.
+            // Previous approach only duped data with owned=false, leaking data_copy on
+            // successful publish (deinit was a no-op since owned=false).
+            const event = Event.initOwned(
+                self.allocator,
+                .custom,
+                self.publish_topic,
+                P.Parser.protocol_name,
+                0,
+                json,
+            ) catch {
                 _ = self.parse_errors.fetchAdd(1, .monotonic);
                 return;
             };
 
-            var event = Event{
-                .id = generateEventId(),
-                .timestamp = std.time.microTimestamp(),
-                .event_type = .custom,
-                .topic = self.publish_topic, // borrowed — stable for listener lifetime
-                .model_type = P.Parser.protocol_name, // comptime string literal
-                .model_id = 0,
-                .data = data_copy,
-                .owned = false, // not fully owned — we manage data_copy manually
-            };
-            _ = &event;
-
             if (!self.bus.publish(event)) {
-                // Queue full — publish freed nothing (owned=false), so we free data_copy
-                self.allocator.free(data_copy);
+                // Queue full — publish() already calls event.deinit() for owned events
             } else {
                 _ = self.events_published.fetchAdd(1, .monotonic);
             }

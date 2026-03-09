@@ -1,8 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Tagged pointer to prevent ABA problem in lock-free stack
-/// Uses 32-bit tag for better ABA protection (4B operations before wraparound)
+/// Tagged pointer to prevent ABA problem in lock-free stack.
+/// Uses 32-bit tag for ABA protection (4B increments before wraparound).
+/// TODO(correctness): At 1M ops/sec the tag wraps in ~72 minutes. For long-running
+/// servers, consider 48-bit tag + 16-bit index (limits pool to 65K entries) or
+/// use platform-specific 128-bit CAS (CMPXCHG16B / CASP).
 const TaggedNodePtr = packed struct {
     ptr: u32, // Index into nodes array (supports up to 4B entries)
     tag: u32, // Version counter (4B increments before wraparound)
@@ -227,10 +230,10 @@ pub fn LockFreePool(comptime T: type) type {
                 return;
             }
 
-            // CRITICAL: This should never happen under normal operation.
-            // If we fail to release after max retries, we have a serious bug or extreme contention.
-            // Panic with diagnostic info to prevent silent memory leak.
-            @panic(std.fmt.comptimePrint("Failed to release object to pool after {d} retries - possible memory leak or extreme contention", .{max_retries}));
+            // Failed to release after max retries — extreme contention or bug.
+            // Log and leak the object rather than crashing the process.
+            std.log.err("Failed to release object to pool after {d} retries — leaking to avoid crash", .{max_retries});
+            return;
         }
 
         pub fn stats(self: *Self) PoolStats {

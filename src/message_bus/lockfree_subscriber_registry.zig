@@ -33,6 +33,12 @@ pub const LockFreeSubscriberRegistry = struct {
 
     // Subscriptions array (grows via RCU, never shrinks)
     subscriptions: std.atomic.Value(*SubscriptionList),
+    // Track old lists from RCU growth for deferred cleanup in deinit().
+    // Concurrent readers may still reference old lists, so we can't free them
+    // immediately. We stash them here and free the containers (but not subscription
+    // data, which was memcpy'd to the new list) in deinit().
+    old_lists: [16]*SubscriptionList = undefined,
+    old_lists_count: usize = 0,
     allocator: Allocator,
 
     pub const SubscriptionList = struct {
@@ -103,6 +109,13 @@ pub const LockFreeSubscriberRegistry = struct {
 
         self.allocator.free(list.items);
         self.allocator.destroy(list);
+
+        // Free old list containers from RCU growth. Subscription data is NOT freed
+        // here — it was memcpy'd into the current list and freed above.
+        for (self.old_lists[0..self.old_lists_count]) |old| {
+            self.allocator.free(old.items);
+            self.allocator.destroy(old);
+        }
     }
 
     pub fn subscribe(
@@ -198,9 +211,13 @@ pub const LockFreeSubscriberRegistry = struct {
         // Atomically swap in the new list
         self.subscriptions.store(new_list, .release);
 
-        // NOTE: Old list is leaked intentionally — concurrent readers may still reference it.
-        // In a production system, use epoch-based reclamation or hazard pointers.
-        // For now this is acceptable: growth is rare and bounded.
+        // Stash old list for deferred cleanup in deinit(). Concurrent readers may
+        // still reference it, so we can't free now. The subscription data was memcpy'd
+        // to the new list, so we only need to free the container + items array later.
+        if (self.old_lists_count < self.old_lists.len) {
+            self.old_lists[self.old_lists_count] = list;
+            self.old_lists_count += 1;
+        }
 
         std.log.info("Subscribed: id={d} topic={s} (grew registry to {d} slots)", .{ id, topic, new_capacity });
         return id;
@@ -225,6 +242,13 @@ pub const LockFreeSubscriberRegistry = struct {
 
     /// Get matching subscribers for an event.
     /// Returns a stack-allocated MatchResult — zero heap allocation on the hot path.
+    ///
+    /// TODO(perf): O(n) linear scan over all slots including inactive ones.
+    ///   Consider maintaining a separate active-only list or compact on unsubscribe.
+    /// TODO(perf): Copies full Subscription structs (~80+ bytes each) into MatchResult buffer.
+    ///   Consider storing pointers instead (safe under RCU — slots are never freed until deinit).
+    /// TODO(perf): TopicRegistry.get() hashes the event topic string once per subscriber.
+    ///   Hash once before the loop and pass the topic_id to matches().
     pub fn getMatchingResult(
         self: *Self,
         event: *const Event,

@@ -22,6 +22,13 @@ pub const MessageBus = @import("message_bus.zig").MessageBus;
 pub const EventWorker = struct {
     const Self = @This();
 
+    /// Thread-local: subscription ID of the handler currently being invoked.
+    /// Set before each handler call, cleared after. When a handler mutates a
+    /// ReactiveModel, the model reads this to tag the outgoing event so the
+    /// event worker skips delivery back to the originating handler.
+    /// Zero means "no handler context" (external publish, all subs receive).
+    pub threadlocal var current_handler_subscription_id: u64 = 0;
+
     id: usize,
     message_bus: *MessageBus,
     config: MessageBus.Config,
@@ -80,8 +87,18 @@ pub const EventWorker = struct {
             const match_result = self.message_bus.subscribers.getMatchingResult(&event);
             const subscribers = match_result.slice();
 
-            // Sequential delivery — fast callbacks, no thread spawn overhead
+            // Sequential delivery — fast callbacks, no thread spawn overhead.
+            // Before calling each handler, set the thread-local so that any
+            // ReactiveModel mutation inside the handler tags its outgoing event
+            // with this subscription ID. After delivery, the event worker
+            // checks source_subscription_id and skips the originating handler.
             for (subscribers) |sub| {
+                // Skip delivery back to the subscription that caused this event
+                if (event.source_subscription_id != 0 and sub.id == event.source_subscription_id) {
+                    continue;
+                }
+                current_handler_subscription_id = sub.id;
+                defer current_handler_subscription_id = 0;
                 sub.handler(&event, allocator);
                 _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
             }

@@ -67,6 +67,8 @@ pub const EpollWorker = struct {
     worker_id: usize,
     cpu_id: u32,
     epoll_fd: i32,
+    // TODO(perf): AutoHashMap allocates on insert/growth. Consider a pre-sized
+    // flat array indexed by fd (bounded by max_connections) for zero-alloc lookup.
     connections: std.AutoHashMap(std.posix.fd_t, *Connection),
     handler_registry_ptr: *anyopaque,
     handler_dispatch_fn: *const fn (*anyopaque, fd: std.posix.fd_t, msg_type: u8, data: []const u8, response_buf: []u8) ?[]const u8,
@@ -214,6 +216,9 @@ pub const EpollWorker = struct {
                 },
 
                 .reading_body => {
+                    // TODO(perf): Large message allocation on hot path. Consider a
+                    // per-connection pre-allocated large buffer or a pool to avoid
+                    // heap allocation for every oversized message.
                     const target_buf = if (conn.message_length > conn.read_buffer.len) blk: {
                         if (conn.large_buffer == null) {
                             conn.large_buffer = try self.allocator.alloc(u8, conn.message_length);

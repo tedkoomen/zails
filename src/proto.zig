@@ -177,10 +177,8 @@ pub fn encodeVarintField(field_number: u32, value: i64, buffer: []u8) !usize {
     pos += try encodeVarint(tag, buffer[pos..]);
 
     // Write value (using zigzag encoding for signed integers)
-    const unsigned: u64 = if (value >= 0)
-        @intCast(value << 1)
-    else
-        @intCast(((-value - 1) << 1) | 1);
+    // Bitwise zigzag avoids overflow on minInt(i64) that arithmetic (-value) would cause
+    const unsigned: u64 = @bitCast((value +% value) ^ (value >> 63));
 
     pos += try encodeVarint(unsigned, buffer[pos..]);
 

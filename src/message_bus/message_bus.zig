@@ -17,9 +17,12 @@ pub const MessageBus = struct {
     worker_threads: []std.Thread,
     shutdown: std.atomic.Value(bool),
     started: bool,
-    total_published: std.atomic.Value(u64),
+    // Cache-line-aligned counters to avoid false sharing between
+    // publisher threads (total_published/total_dropped) and worker
+    // threads (total_delivered).
+    total_published: std.atomic.Value(u64) align(64),
     total_dropped: std.atomic.Value(u64),
-    total_delivered: std.atomic.Value(u64),
+    total_delivered: std.atomic.Value(u64) align(64),
     config: Config,
     allocator: Allocator,
 
@@ -180,7 +183,7 @@ test "message bus publish and subscribe" {
         "{}",
     );
 
-    bus.publish(event);
+    _ = bus.publish(event);
 
     const stats = bus.getStats();
     try std.testing.expectEqual(@as(u64, 1), stats.published);
@@ -205,16 +208,16 @@ test "message bus queue overflow" {
     const event4 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 4, "{}");
     const event5 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 5, "{}");
 
-    bus.publish(event1);
-    bus.publish(event2);
-    bus.publish(event3);
-    bus.publish(event4);
+    _ = bus.publish(event1);
+    _ = bus.publish(event2);
+    _ = bus.publish(event3);
+    _ = bus.publish(event4);
 
     const stats1 = bus.getStats();
     try std.testing.expectEqual(@as(u64, 4), stats1.published);
 
     // 5th event should be dropped (queue full)
-    bus.publish(event5);
+    _ = bus.publish(event5);
 
     const stats2 = bus.getStats();
     try std.testing.expectEqual(@as(u64, 1), stats2.dropped);

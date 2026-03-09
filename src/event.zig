@@ -61,6 +61,10 @@ pub const Field = struct {
 /// - Events created with initOwned() own their string data and must call deinit()
 /// - Events created with struct literal syntax don't own data (caller manages lifetime)
 /// - Check 'owned' field to determine if deinit() should be called
+///
+/// TODO(perf): This struct is ~400+ bytes (8 Fields × ~42 bytes each + metadata) and is
+/// copied by value through the ring buffer on every push/pop. Consider indirecting via
+/// pointer (pool-allocated Event*) if profiling shows memcpy as a bottleneck.
 pub const Event = struct {
     id: u128, // UUID (generated with std.Random)
     timestamp: i64, // Unix timestamp microseconds
@@ -70,6 +74,12 @@ pub const Event = struct {
     model_id: u64,
     data: []const u8, // Serialized model state (protobuf)
     owned: bool = false, // If true, this Event owns its string data
+
+    /// Subscription ID that caused this event (0 = no source / external).
+    /// Used to prevent feedback loops: the event worker skips delivery
+    /// back to this subscription, so a handler that mutates a model
+    /// won't re-trigger itself from the model's auto-published event.
+    source_subscription_id: u64 = 0,
 
     // Typed fields for allocation-free filtering (defaults preserve backward compat)
     fields: [MAX_EVENT_FIELDS]Field = [_]Field{.{}} ** MAX_EVENT_FIELDS,
@@ -313,17 +323,32 @@ pub const Event = struct {
     pub fn deinit(self: Event, allocator: Allocator) void {
         if (!self.owned) return;
 
-        if (self.topic.len > 0) allocator.free(self.topic);
-        if (self.model_type.len > 0) allocator.free(self.model_type);
-        if (self.data.len > 0) allocator.free(self.data);
+        // Zig allocators handle zero-length slices correctly — no guard needed.
+        // Previous guards would leak zero-length owned allocations from dupe("").
+        allocator.free(self.topic);
+        allocator.free(self.model_type);
+        allocator.free(self.data);
     }
 };
 
-/// Generate unique event ID using random UUID (v4)
+/// Generate unique event ID using thread-local PRNG.
+/// Previous implementation called std.crypto.random.bytes() which issues a
+/// getrandom(2) syscall per event — ~200ns overhead on the hot path.
+/// Thread-local PRNG seeds once from OS entropy, then generates IDs lock-free.
 pub fn generateEventId() u128 {
-    var seed: [16]u8 = undefined;
-    std.crypto.random.bytes(&seed);
-    return std.mem.readInt(u128, &seed, .little);
+    const State = struct {
+        threadlocal var prng: ?std.Random.Xoshiro256 = null;
+    };
+    if (State.prng == null) {
+        var seed_bytes: [8]u8 = undefined;
+        std.crypto.random.bytes(&seed_bytes);
+        State.prng = std.Random.Xoshiro256.init(@bitCast(seed_bytes));
+    }
+    var rng = State.prng.?;
+    const lo: u128 = rng.next();
+    const hi: u128 = rng.next();
+    State.prng = rng;
+    return (hi << 64) | lo;
 }
 
 test "event serialization and deserialization" {

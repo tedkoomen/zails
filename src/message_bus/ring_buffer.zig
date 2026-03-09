@@ -21,8 +21,12 @@ pub const EventRingBuffer = struct {
     capacity: usize,
     mask: usize,
     slots: []Slot,
-    head: std.atomic.Value(usize), // Producer claim position
-    tail: std.atomic.Value(usize), // Consumer claim position
+    // Cache line padding: head and tail are contended by different threads
+    // (producers vs consumers). Without padding, they share a cache line
+    // causing false sharing and cross-core invalidation traffic.
+    head: std.atomic.Value(usize) align(64), // Producer claim position
+    _pad: [64 - @sizeOf(std.atomic.Value(usize))]u8 = undefined,
+    tail: std.atomic.Value(usize) align(64), // Consumer claim position
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, capacity: usize) !Self {
@@ -70,7 +74,7 @@ pub const EventRingBuffer = struct {
 
             if (diff == 0) {
                 // Slot is available for writing — try to claim it
-                if (self.head.cmpxchgWeak(head, head + 1, .monotonic, .monotonic)) |updated| {
+                if (self.head.cmpxchgWeak(head, head + 1, .acq_rel, .monotonic)) |updated| {
                     head = updated;
                     continue;
                 }
@@ -99,7 +103,7 @@ pub const EventRingBuffer = struct {
 
             if (diff == 0) {
                 // Slot is ready for reading — try to claim it
-                if (self.tail.cmpxchgWeak(tail, tail + 1, .monotonic, .monotonic)) |updated| {
+                if (self.tail.cmpxchgWeak(tail, tail + 1, .acq_rel, .monotonic)) |updated| {
                     tail = updated;
                     continue;
                 }
@@ -117,16 +121,21 @@ pub const EventRingBuffer = struct {
         }
     }
 
+    /// Approximate size. NOT linearizable — head and tail are read non-atomically
+    /// as a pair, so the result may be stale or briefly negative under concurrency.
+    /// Safe for diagnostics/stats, NOT for control flow decisions.
     pub fn size(self: *const Self) usize {
         const head = self.head.load(.acquire);
         const tail = self.tail.load(.acquire);
         return head -| tail;
     }
 
+    /// Approximate emptiness check. See size() for concurrency caveat.
     pub fn isEmpty(self: *const Self) bool {
         return self.size() == 0;
     }
 
+    /// Approximate fullness check. See size() for concurrency caveat.
     pub fn isFull(self: *const Self) bool {
         const head = self.head.load(.acquire);
         const tail = self.tail.load(.acquire);

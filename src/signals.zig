@@ -30,8 +30,11 @@ pub const SignalHandler = struct {
 var shutdown_ptr: ?*std.atomic.Value(bool) = null;
 
 fn handleSignal(sig: i32) callconv(.c) void {
+    _ = sig;
+    // Only set the atomic flag — std.log.info is NOT async-signal-safe
+    // and can deadlock if the signal arrives while holding a log mutex.
+    // The main loop should check the flag and log the shutdown message.
     if (shutdown_ptr) |ptr| {
         ptr.store(true, .release);
-        std.log.info("Received signal {}, initiating shutdown...", .{sig});
     }
 }

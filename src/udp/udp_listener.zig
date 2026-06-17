@@ -196,7 +196,8 @@ pub fn UdpListener(comptime Protocols: anytype) type {
             _ = self.parse_errors.fetchAdd(1, .monotonic);
         }
 
-        /// Serialize parsed message to JSON and publish to message bus
+        /// Serialize parsed message to JSON and publish to message bus.
+        /// Only allocates the data payload (topic and model_type are borrowed).
         fn publishEvent(self: *Self, comptime P: anytype, msg: *const P.Parser.Message) void {
             // Serialize to JSON in stack buffer
             var json_buf: [8192]u8 = undefined;
@@ -206,7 +207,9 @@ pub fn UdpListener(comptime Protocols: anytype) type {
                 return;
             };
 
-            // Create owned event (copies data for message bus lifetime)
+            // Create a fully-owned event so the bus can free it on drop or after delivery.
+            // Previous approach only duped data with owned=false, leaking data_copy on
+            // successful publish (deinit was a no-op since owned=false).
             const event = Event.initOwned(
                 self.allocator,
                 .custom,
@@ -219,8 +222,11 @@ pub fn UdpListener(comptime Protocols: anytype) type {
                 return;
             };
 
-            self.bus.publish(event);
-            _ = self.events_published.fetchAdd(1, .monotonic);
+            if (!self.bus.publish(event)) {
+                // Queue full — publish() already calls event.deinit() for owned events
+            } else {
+                _ = self.events_published.fetchAdd(1, .monotonic);
+            }
         }
 
         /// Get the sequence tracker for external use (e.g., checking

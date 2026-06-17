@@ -101,20 +101,22 @@ pub const EventBuilder = struct {
     }
 
     /// Build and publish to message bus (convenience method)
-    pub fn publish(self: Self, bus: *MessageBus) void {
-        bus.publish(self.event);
+    /// Returns true if published, false if dropped (queue full).
+    pub fn publish(self: Self, bus: *MessageBus) bool {
+        return bus.publish(self.event);
     }
 };
 
 /// Simple helper: Publish event to global message bus
 /// Handlers can use this without knowing about Event internals
-pub fn publishEvent(comptime topic: []const u8, data: []const u8) void {
+pub fn publishEvent(comptime topic: []const u8, data: []const u8) bool {
     const globals = @import("../globals.zig");
     if (globals.global_message_bus) |bus| {
-        EventBuilder.init(topic)
+        return EventBuilder.init(topic)
             .data(data)
             .publish(bus);
     }
+    return false;
 }
 
 /// Helper: Publish model event with full context
@@ -123,17 +125,18 @@ pub fn publishModelEvent(
     model_type: []const u8,
     model_id: u64,
     data: []const u8,
-) void {
+) bool {
     validateTopicFormat(topic);
 
     const globals = @import("../globals.zig");
     if (globals.global_message_bus) |bus| {
-        EventBuilder.init(topic)
+        return EventBuilder.init(topic)
             .modelType(model_type)
             .modelId(model_id)
             .data(data)
             .publish(bus);
     }
+    return false;
 }
 
 // ====================

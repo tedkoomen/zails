@@ -59,6 +59,7 @@ pub const MAX_EVENT_FIELDS = @import("../event.zig").MAX_EVENT_FIELDS;
 // Filters and subscriptions
 pub const Filter = @import("filter.zig").Filter;
 pub const WhereClause = @import("filter.zig").Filter.WhereClause;
+pub const ParsedValue = @import("filter.zig").Filter.ParsedValue;
 
 pub const Subscription = @import("subscriber.zig").Subscription;
 pub const SubscriptionId = @import("subscriber.zig").SubscriptionId;
@@ -68,6 +69,7 @@ pub const HandlerFn = @import("subscriber.zig").HandlerFn;
 pub const EventRingBuffer = @import("ring_buffer.zig").EventRingBuffer;
 pub const SubscriberRegistry = @import("subscriber_registry.zig").SubscriberRegistry; // Legacy (uses RwLock)
 pub const LockFreeSubscriberRegistry = @import("lockfree_subscriber_registry.zig").LockFreeSubscriberRegistry; // Lock-free version
+pub const MatchResult = LockFreeSubscriberRegistry.MatchResult;
 pub const EventWorker = @import("event_worker.zig").EventWorker;
 
 // Entity-owned topic declarations

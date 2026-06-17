@@ -10,6 +10,7 @@ pub const Config = struct {
     max_connections: usize,
     config_path: ?[]const u8,
     ports_from_cli: bool,
+    verbose: bool,
 
     pub fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
         var ports = std.ArrayList(u16){};
@@ -22,6 +23,7 @@ pub const Config = struct {
         var max_connections: usize = 10000;
         var config_path: ?[]const u8 = null;
         var ports_from_cli = false;
+        var verbose: bool = false;
 
         var i: usize = 1; // Skip program name
         while (i < args.len) : (i += 1) {
@@ -62,6 +64,8 @@ pub const Config = struct {
                 i += 1;
                 if (i >= args.len) return error.MissingMaxConnectionsValue;
                 max_connections = try std.fmt.parseInt(usize, args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+                verbose = true;
             } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                 printUsage();
                 return error.HelpRequested;
@@ -87,6 +91,7 @@ pub const Config = struct {
             .max_connections = max_connections,
             .config_path = config_path,
             .ports_from_cli = ports_from_cli,
+            .verbose = verbose,
         };
     }
 
@@ -134,6 +139,7 @@ pub const Config = struct {
             \\  --pool-size <count>           Object pool size per worker (default: 1024)
             \\  --max-connections <count>     Maximum concurrent connections (default: 10000)
             \\  -c, --config <path>           Load JSON/YAML Zails config file
+            \\  -v, --verbose                 Enable verbose startup banners
             \\  -h, --help                    Show this help message
             \\
             \\Examples:

@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Event = @import("../event.zig").Event;
 const Filter = @import("filter.zig").Filter;
+const topic_matcher = @import("topic_matcher.zig");
 
 pub const HandlerFn = *const fn (event: *const Event, allocator: Allocator) void;
 
@@ -11,8 +12,31 @@ pub const Subscription = struct {
     filter: Filter,
     handler: HandlerFn,
     created_at: i64,
+    topic_pattern: topic_matcher.TopicPattern = .any, // Computed at subscribe time
 
+    /// Match using pre-computed hash-based topic pattern (O(1)).
+    /// Falls back to string match if topic_pattern is .any and topic isn't "*",
+    /// which means the pattern was never computed (e.g. test-constructed subscriptions
+    /// or legacy code). True .any (topic == "*") matches everything.
     pub fn matchesTopic(self: *const Subscription, event_topic: []const u8) bool {
+        // If topic_pattern is .any but the topic string isn't "*", the pattern
+        // was never computed — fall through to string matching.
+        if (self.topic_pattern == .any and !std.mem.eql(u8, self.topic, "*")) {
+            return self.matchesTopicString(event_topic);
+        }
+
+        // Use hash-based O(1) matching via pre-computed topic pattern
+        const event_id = topic_matcher.TopicRegistry.get(event_topic);
+        if (event_id != 0) {
+            return self.topic_pattern.matches(event_id);
+        }
+
+        // Fallback: string-based matching for non-standard topic formats
+        return self.matchesTopicString(event_topic);
+    }
+
+    /// Legacy string-based topic matching (used as fallback)
+    fn matchesTopicString(self: *const Subscription, event_topic: []const u8) bool {
         if (std.mem.eql(u8, self.topic, event_topic)) {
             return true;
         }
@@ -27,6 +51,20 @@ pub const Subscription = struct {
         }
 
         return false;
+    }
+
+    /// Compute the TopicPattern from a topic string.
+    /// Called at subscribe time to avoid runtime parsing on every match.
+    pub fn computeTopicPattern(topic: []const u8) topic_matcher.TopicPattern {
+        if (std.mem.eql(u8, topic, "*")) {
+            return .any;
+        }
+        if (std.mem.endsWith(u8, topic, ".*")) {
+            const wildcard_id = topic_matcher.TopicRegistry.get(topic);
+            return .{ .wildcard = wildcard_id };
+        }
+        const exact_id = topic_matcher.TopicRegistry.get(topic);
+        return .{ .exact = exact_id };
     }
 };
 

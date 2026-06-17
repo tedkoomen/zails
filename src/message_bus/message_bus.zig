@@ -17,9 +17,12 @@ pub const MessageBus = struct {
     worker_threads: []std.Thread,
     shutdown: std.atomic.Value(bool),
     started: bool,
-    total_published: std.atomic.Value(u64),
+    // Cache-line-aligned counters to avoid false sharing between
+    // publisher threads (total_published/total_dropped) and worker
+    // threads (total_delivered).
+    total_published: std.atomic.Value(u64) align(64),
     total_dropped: std.atomic.Value(u64),
-    total_delivered: std.atomic.Value(u64),
+    total_delivered: std.atomic.Value(u64) align(64),
     total_backpressure: std.atomic.Value(u64),
     config: Config,
     allocator: Allocator,
@@ -107,19 +110,24 @@ pub const MessageBus = struct {
         std.log.info("MessageBus started with {} workers", .{self.workers.len});
     }
 
-    pub fn publish(self: *Self, event: Event) void {
+    /// Publish an event to the bus. Returns true on success, false if dropped (queue full).
+    /// On drop, owned event data is freed automatically.
+    pub fn publish(self: *Self, event: Event) bool {
         if (self.event_queue.push(event)) {
             _ = self.total_published.fetchAdd(1, .monotonic);
-            return;
+            return true;
         }
 
         switch (self.config.overflow_policy) {
-            .drop_newest => self.dropEvent(event),
-            .backpressure => self.publishWithBackpressure(event),
+            .drop_newest => {
+                self.dropEvent(event);
+                return false;
+            },
+            .backpressure => return self.publishWithBackpressure(event),
         }
     }
 
-    fn publishWithBackpressure(self: *Self, event: Event) void {
+    fn publishWithBackpressure(self: *Self, event: Event) bool {
         _ = self.total_backpressure.fetchAdd(1, .monotonic);
 
         var spins: usize = 0;
@@ -127,7 +135,7 @@ pub const MessageBus = struct {
         while (!self.shutdown.load(.acquire)) {
             if (self.event_queue.push(event)) {
                 _ = self.total_published.fetchAdd(1, .monotonic);
-                return;
+                return true;
             }
 
             if (spins < self.config.spin_before_yield) {
@@ -146,6 +154,7 @@ pub const MessageBus = struct {
         }
 
         self.dropEvent(event);
+        return false;
     }
 
     fn dropEvent(self: *Self, event: Event) void {
@@ -229,7 +238,7 @@ test "message bus publish and subscribe" {
         "{}",
     );
 
-    bus.publish(event);
+    _ = bus.publish(event);
 
     const stats = bus.getStats();
     try std.testing.expectEqual(@as(u64, 1), stats.published);
@@ -242,29 +251,32 @@ test "message bus queue overflow" {
     const allocator = std.testing.allocator;
 
     var bus = try MessageBus.init(allocator, .{
-        .queue_capacity = 4, // Very small queue
+        .queue_capacity = 4, // Small queue (4 slots with Vyukov MPMC)
         .worker_count = 1,
         .overflow_policy = .drop_newest,
     });
     defer bus.deinit();
 
-    // Use owned events
+    // Use owned events — fill all 4 slots
     const event1 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 1, "{}");
     const event2 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 2, "{}");
     const event3 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 3, "{}");
     const event4 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 4, "{}");
+    const event5 = try Event.initOwned(allocator, .model_created, "Test.created", "Test", 5, "{}");
 
-    bus.publish(event1);
-    bus.publish(event2);
-    bus.publish(event3);
+    _ = bus.publish(event1);
+    _ = bus.publish(event2);
+    _ = bus.publish(event3);
+    _ = bus.publish(event4);
 
     const stats1 = bus.getStats();
-    try std.testing.expectEqual(@as(u64, 3), stats1.published);
+    try std.testing.expectEqual(@as(u64, 4), stats1.published);
 
-    bus.publish(event4);
+    // 5th event should be dropped (queue full)
+    _ = bus.publish(event5);
 
     const stats2 = bus.getStats();
     try std.testing.expectEqual(@as(u64, 1), stats2.dropped);
 
-    // event4 is automatically freed by publish() when dropped
+    // event5 is automatically freed by publish() when dropped
 }

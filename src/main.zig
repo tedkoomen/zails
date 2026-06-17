@@ -60,7 +60,8 @@ pub fn main() !void {
         .flush_interval_ms = 1,
         .overflow_policy = .backpressure,
     });
-    defer bus_instance.deinit();
+    var bus_cleanup_transferred = false;
+    errdefer if (!bus_cleanup_transferred) bus_instance.deinit();
 
     try bus_instance.start();
     globals.global_message_bus = &bus_instance;
@@ -72,7 +73,11 @@ pub fn main() !void {
     // Create handler registry (comptime dispatch from handlers/ folder)
     const Registry = handler_registry.HandlerRegistry(handlers.handler_modules);
     var registry = try Registry.init(allocator);
-    defer registry.deinit();
+    bus_cleanup_transferred = true;
+    defer {
+        bus_instance.deinit();
+        registry.deinit();
+    }
 
     // Post-initialize handlers (configure with message bus, etc.)
     try registry.postInit(allocator);
@@ -296,11 +301,13 @@ pub fn main() !void {
             std.log.warn("Local IPC disabled for port {}: {}", .{ port, err });
             continue;
         };
-        local_ipc_servers[i].?.start() catch |err| {
-            std.log.warn("Local IPC worker failed for port {}: {}", .{ port, err });
-            local_ipc_servers[i].?.deinit();
-            local_ipc_servers[i] = null;
-        };
+        if (local_ipc_servers[i]) |*server| {
+            server.start() catch |err| {
+                std.log.warn("Local IPC worker failed for port {}: {}", .{ port, err });
+                server.deinit();
+                local_ipc_servers[i] = null;
+            };
+        }
     }
 
     defer {

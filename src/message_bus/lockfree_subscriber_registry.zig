@@ -35,12 +35,14 @@ pub const LockFreeSubscriberRegistry = struct {
 
     // Subscriptions array (grows via RCU, never shrinks)
     subscriptions: std.atomic.Value(*SubscriptionList),
+    // Serialize the rare RCU growth path. Slot claims remain lock-free, but
+    // replacing the list must be single-writer or concurrent grows lose updates.
+    growth_lock: std.Thread.Mutex = .{},
     // Track old lists from RCU growth for deferred cleanup in deinit().
     // Concurrent readers may still reference old lists, so we can't free them
     // immediately. We stash them here and free the containers (but not subscription
     // data, which was memcpy'd to the new list) in deinit().
-    old_lists: [16]*SubscriptionList = undefined,
-    old_lists_count: usize = 0,
+    old_lists: std.ArrayList(*SubscriptionList) = .{},
     allocator: Allocator,
 
     pub const SubscriptionList = struct {
@@ -49,16 +51,26 @@ pub const LockFreeSubscriberRegistry = struct {
         capacity: usize,
     };
 
-    pub const SubscriptionSlot = struct {
+    pub const SubscriptionRecord = struct {
         subscription: Subscription,
+        active: std.atomic.Value(bool),
+    };
+
+    pub const SubscriptionSlot = struct {
+        record: ?*SubscriptionRecord,
         state: std.atomic.Value(u8), // SLOT_INACTIVE / SLOT_WRITING / SLOT_ACTIVE / SLOT_DELETED
         ever_used: bool, // true if subscription data has been written
 
         pub fn isActive(self: *const SubscriptionSlot) bool {
-            return self.state.load(.acquire) == SLOT_ACTIVE;
+            if (self.state.load(.acquire) != SLOT_ACTIVE) return false;
+            const record = self.record orelse return false;
+            return record.active.load(.acquire);
         }
 
         pub fn deactivate(self: *SubscriptionSlot) void {
+            if (self.record) |record| {
+                record.active.store(false, .release);
+            }
             self.state.store(SLOT_DELETED, .release);
         }
     };
@@ -74,6 +86,30 @@ pub const LockFreeSubscriberRegistry = struct {
         }
     };
 
+    pub const MatchingIterator = struct {
+        list: *SubscriptionList,
+        event: *const Event,
+        index: usize = 0,
+
+        pub fn next(self: *MatchingIterator) ?Subscription {
+            while (self.index < self.list.items.len) {
+                const slot = &self.list.items[self.index];
+                self.index += 1;
+
+                if (!slot.isActive()) continue;
+
+                const record = slot.record orelse continue;
+                const sub = &record.subscription;
+                if (!sub.matchesTopic(self.event.topic)) continue;
+                if (!sub.filter.matches(self.event)) continue;
+
+                return sub.*;
+            }
+
+            return null;
+        }
+    };
+
     pub fn init(allocator: Allocator) !Self {
         const initial_capacity = 64;
         const list = try allocator.create(SubscriptionList);
@@ -81,7 +117,7 @@ pub const LockFreeSubscriberRegistry = struct {
 
         const items = try allocator.alloc(SubscriptionSlot, initial_capacity);
         @memset(items, SubscriptionSlot{
-            .subscription = undefined,
+            .record = null,
             .state = std.atomic.Value(u8).init(SLOT_INACTIVE),
             .ever_used = false,
         });
@@ -105,20 +141,60 @@ pub const LockFreeSubscriberRegistry = struct {
         // (both active and deactivated, since unsubscribe no longer frees)
         for (list.items) |*slot| {
             if (slot.ever_used) {
-                self.allocator.free(slot.subscription.topic);
-                self.allocator.free(slot.subscription.filter.conditions);
+                if (slot.record) |record| {
+                    self.destroyRecord(record);
+                }
             }
         }
 
         self.allocator.free(list.items);
         self.allocator.destroy(list);
 
-        // Free old list containers from RCU growth. Subscription data is NOT freed
-        // here — it was memcpy'd into the current list and freed above.
-        for (self.old_lists[0..self.old_lists_count]) |old| {
+        // Free old list containers from RCU growth. Subscription records are shared
+        // with the current list and were freed above exactly once.
+        for (self.old_lists.items) |old| {
             self.allocator.free(old.items);
             self.allocator.destroy(old);
         }
+        self.old_lists.deinit(self.allocator);
+    }
+
+    fn destroyRecord(self: *Self, record: *SubscriptionRecord) void {
+        self.allocator.free(record.subscription.topic);
+        self.allocator.free(record.subscription.filter.conditions);
+        self.allocator.destroy(record);
+    }
+
+    fn claimInactiveSlot(list: *SubscriptionList, record: *SubscriptionRecord) bool {
+        for (list.items) |*slot| {
+            // Three-state protocol: CAS inactive -> writing FIRST, then write data.
+            if (slot.state.cmpxchgWeak(
+                SLOT_INACTIVE,
+                SLOT_WRITING,
+                .acquire,
+                .monotonic,
+            ) != null) {
+                continue;
+            }
+
+            slot.record = record;
+            slot.ever_used = true;
+
+            // Publish: make data visible to readers.
+            slot.state.store(SLOT_ACTIVE, .release);
+            _ = list.count.fetchAdd(1, .monotonic);
+            return true;
+        }
+
+        return false;
+    }
+
+    fn activeCount(list: *SubscriptionList) usize {
+        var count: usize = 0;
+        for (list.items) |*slot| {
+            if (slot.isActive()) count += 1;
+        }
+        return count;
     }
 
     pub fn subscribe(
@@ -144,38 +220,31 @@ pub const LockFreeSubscriberRegistry = struct {
 
         const filter_copy = Filter{ .conditions = conditions_copy };
 
-        const sub = Subscription{
-            .id = id,
-            .topic = topic_copy,
-            .filter = filter_copy,
-            .handler = handler,
-            .created_at = std.time.timestamp(),
-            .topic_pattern = Subscription.computeTopicPattern(topic),
+        const record = try self.allocator.create(SubscriptionRecord);
+        var record_published = false;
+        errdefer if (!record_published) self.allocator.destroy(record);
+
+        record.* = .{
+            .subscription = .{
+                .id = id,
+                .topic = topic_copy,
+                .filter = filter_copy,
+                .handler = handler,
+                .created_at = std.time.timestamp(),
+                .topic_pattern = Subscription.computeTopicPattern(topic),
+            },
+            .active = std.atomic.Value(bool).init(true),
         };
 
-        var list = self.subscriptions.load(.acquire);
+        self.growth_lock.lock();
+        defer self.growth_lock.unlock();
 
-        // Try to find and claim an inactive slot
-        for (list.items) |*slot| {
-            // Three-state protocol: CAS inactive → writing FIRST, then write data
-            if (slot.state.cmpxchgWeak(
-                SLOT_INACTIVE,
-                SLOT_WRITING,
-                .acquire,
-                .monotonic,
-            ) != null) {
-                // Slot was not inactive (already active or being written by another thread)
-                continue;
-            }
-
-            // We own this slot exclusively. Write the subscription data.
-            slot.subscription = sub;
-            slot.ever_used = true;
-
-            // Publish: make data visible to readers
-            slot.state.store(SLOT_ACTIVE, .release);
-            _ = list.count.fetchAdd(1, .monotonic);
-
+        // Subscribe/unsubscribe are control-plane operations. Serializing writers
+        // prevents a fast-path slot claim from landing in an old list while a
+        // growth snapshot is being copied.
+        const list = self.subscriptions.load(.acquire);
+        if (claimInactiveSlot(list, record)) {
+            record_published = true;
             std.log.info("Subscribed: id={d} topic={s}", .{ id, topic });
             return id;
         }
@@ -188,12 +257,13 @@ pub const LockFreeSubscriberRegistry = struct {
         const new_items = try self.allocator.alloc(SubscriptionSlot, new_capacity);
         errdefer self.allocator.free(new_items);
 
-        // Copy existing slots
+        // Copy existing slots. Slots now point at shared SubscriptionRecord
+        // objects, so an unsubscribe tombstone is visible to old and new lists.
         @memcpy(new_items[0..list.capacity], list.items);
         // Initialize new slots
         for (new_items[list.capacity..]) |*slot| {
             slot.* = SubscriptionSlot{
-                .subscription = undefined,
+                .record = null,
                 .state = std.atomic.Value(u8).init(SLOT_INACTIVE),
                 .ever_used = false,
             };
@@ -201,26 +271,23 @@ pub const LockFreeSubscriberRegistry = struct {
 
         new_list.* = SubscriptionList{
             .items = new_items,
-            .count = std.atomic.Value(usize).init(list.count.load(.monotonic)),
+            .count = std.atomic.Value(usize).init(activeCount(list)),
             .capacity = new_capacity,
         };
 
+        // Stash old list before publishing the replacement. Concurrent readers may
+        // still reference it, so only deinit frees old containers.
+        try self.old_lists.append(self.allocator, list);
+
         // Place subscription in first new slot
-        new_items[list.capacity].subscription = sub;
+        new_items[list.capacity].record = record;
         new_items[list.capacity].ever_used = true;
         new_items[list.capacity].state = std.atomic.Value(u8).init(SLOT_ACTIVE);
-        new_list.count.store(list.count.load(.monotonic) + 1, .monotonic);
+        new_list.count.store(activeCount(list) + 1, .monotonic);
 
-        // Atomically swap in the new list
+        // Publish the new list. The growth lock makes this single-writer.
         self.subscriptions.store(new_list, .release);
-
-        // Stash old list for deferred cleanup in deinit(). Concurrent readers may
-        // still reference it, so we can't free now. The subscription data was memcpy'd
-        // to the new list, so we only need to free the container + items array later.
-        if (self.old_lists_count < self.old_lists.len) {
-            self.old_lists[self.old_lists_count] = list;
-            self.old_lists_count += 1;
-        }
+        record_published = true;
 
         std.log.info("Subscribed: id={d} topic={s} (grew registry to {d} slots)", .{ id, topic, new_capacity });
         return id;
@@ -233,7 +300,9 @@ pub const LockFreeSubscriberRegistry = struct {
         const list = self.subscriptions.load(.acquire);
 
         for (list.items) |*slot| {
-            if (slot.isActive() and slot.subscription.id == id) {
+            if (!slot.isActive()) continue;
+            const record = slot.record orelse continue;
+            if (record.subscription.id == id) {
                 slot.deactivate();
                 _ = list.count.fetchSub(1, .monotonic);
 
@@ -266,7 +335,8 @@ pub const LockFreeSubscriberRegistry = struct {
         for (list.items) |*slot| {
             if (!slot.isActive()) continue;
 
-            const sub = &slot.subscription;
+            const record = slot.record orelse continue;
+            const sub = &record.subscription;
 
             if (!sub.matchesTopic(event.topic)) continue;
             if (!sub.filter.matches(event)) continue;
@@ -283,16 +353,33 @@ pub const LockFreeSubscriberRegistry = struct {
         return result;
     }
 
+    /// Iterate matching subscribers from a single RCU snapshot without heap
+    /// allocation and without the legacy MatchResult fanout cap.
+    pub fn matchingIterator(
+        self: *Self,
+        event: *const Event,
+    ) MatchingIterator {
+        return .{
+            .list = self.subscriptions.load(.acquire),
+            .event = event,
+        };
+    }
+
     /// Legacy API: allocates result on heap. Prefer getMatchingResult() for hot path.
     pub fn getMatching(
         self: *Self,
         event: *const Event,
         allocator: Allocator,
     ) ![]Subscription {
-        const match_result = self.getMatchingResult(event);
-        const result = try allocator.alloc(Subscription, match_result.count);
-        @memcpy(result, match_result.buffer[0..match_result.count]);
-        return result;
+        const list = self.subscriptions.load(.acquire);
+        var matches: std.ArrayList(Subscription) = .{};
+        errdefer matches.deinit(allocator);
+
+        var it = MatchingIterator{ .list = list, .event = event };
+        while (it.next()) |sub| {
+            try matches.append(allocator, sub);
+        }
+        return try matches.toOwnedSlice(allocator);
     }
 
     pub fn getTopicSubscriptionCount(self: *Self, topic: []const u8) usize {
@@ -300,7 +387,9 @@ pub const LockFreeSubscriberRegistry = struct {
 
         var count: usize = 0;
         for (list.items) |*slot| {
-            if (slot.isActive() and std.mem.eql(u8, slot.subscription.topic, topic)) {
+            if (!slot.isActive()) continue;
+            const record = slot.record orelse continue;
+            if (std.mem.eql(u8, record.subscription.topic, topic)) {
                 count += 1;
             }
         }
@@ -309,7 +398,7 @@ pub const LockFreeSubscriberRegistry = struct {
 
     pub fn getTotalSubscriptionCount(self: *Self) usize {
         const list = self.subscriptions.load(.acquire);
-        return list.count.load(.acquire);
+        return activeCount(list);
     }
 };
 
@@ -467,4 +556,49 @@ test "subscriber registry grows beyond 64 slots" {
     try std.testing.expectEqual(@as(usize, 100), registry.getTotalSubscriptionCount());
 
     for (ids) |id| registry.unsubscribe(id);
+}
+
+test "unsubscribe tombstone is shared across grown snapshots" {
+    const allocator = std.testing.allocator;
+
+    var registry = try LockFreeSubscriberRegistry.init(allocator);
+    defer registry.deinit();
+
+    const filter = Filter{ .conditions = &.{} };
+
+    var ids: [65]u64 = undefined;
+    for (0..64) |i| {
+        var topic_buf: [32]u8 = undefined;
+        const topic = try std.fmt.bufPrint(&topic_buf, "topic.{d}", .{i});
+        ids[i] = try registry.subscribe(topic, filter, testHandler1);
+    }
+
+    const old_list = registry.subscriptions.load(.acquire);
+
+    ids[64] = try registry.subscribe("topic.grown", filter, testHandler1);
+    const new_list = registry.subscriptions.load(.acquire);
+    try std.testing.expect(old_list != new_list);
+
+    registry.unsubscribe(ids[0]);
+
+    var old_active = false;
+    for (old_list.items) |*slot| {
+        const record = slot.record orelse continue;
+        if (record.subscription.id == ids[0]) {
+            old_active = slot.isActive();
+            break;
+        }
+    }
+
+    var new_active = false;
+    for (new_list.items) |*slot| {
+        const record = slot.record orelse continue;
+        if (record.subscription.id == ids[0]) {
+            new_active = slot.isActive();
+            break;
+        }
+    }
+
+    try std.testing.expect(!old_active);
+    try std.testing.expect(!new_active);
 }

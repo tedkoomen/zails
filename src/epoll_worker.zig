@@ -219,14 +219,14 @@ pub const EpollWorker = struct {
                 },
 
                 .reading_body => {
-                    // TODO(perf): Large message allocation on hot path. Consider a
-                    // per-connection pre-allocated large buffer or a pool to avoid
-                    // heap allocation for every oversized message.
                     const target_buf = if (conn.message_length > conn.read_buffer.len) blk: {
-                        if (conn.large_buffer == null) {
+                        if (conn.large_buffer == null or conn.large_buffer.?.len < conn.message_length) {
+                            if (conn.large_buffer) |buf| {
+                                self.allocator.free(buf);
+                            }
                             conn.large_buffer = try self.allocator.alloc(u8, conn.message_length);
                         }
-                        break :blk conn.large_buffer.?;
+                        break :blk conn.large_buffer.?[0..conn.message_length];
                     } else conn.read_buffer[0..conn.message_length];
 
                     const n = std.posix.read(conn.fd, target_buf[conn.body_pos..]) catch |err| {
@@ -246,8 +246,8 @@ pub const EpollWorker = struct {
 
                 .processing => {
                     const request_start_ns = std.time.nanoTimestamp();
-                    const request_data = if (conn.large_buffer) |buf|
-                        buf[0..conn.message_length]
+                    const request_data = if (conn.message_length > conn.read_buffer.len)
+                        conn.large_buffer.?[0..conn.message_length]
                     else
                         conn.read_buffer[0..conn.message_length];
 
@@ -271,62 +271,28 @@ pub const EpollWorker = struct {
                         metrics.recordRequest(conn.msg_type, latency_us);
                     }
 
-                    // Prepare response header (in-place before write_buffer)
-                    var header: [5]u8 = undefined;
-                    header[0] = conn.msg_type;
-                    std.mem.writeInt(u32, header[1..5], @as(u32, @intCast(response.len)), .big);
-
-                    // Use writev for scatter-gather write: header + payload in ONE syscall.
-                    // Eliminates 2 setsockopt(TCP_CORK) calls per request (~1-2µs saved).
-                    var iov = [2]std.posix.iovec_const{
-                        .{ .base = &header, .len = 5 },
-                        .{ .base = response.ptr, .len = response.len },
-                    };
-
-                    const total_write_len = 5 + response.len;
-                    var total_written: usize = 0;
-
-                    while (total_written < total_write_len) {
-                        const rc = std.os.linux.writev(conn.fd, &iov, 2);
-                        const n = switch (std.posix.errno(rc)) {
-                            .SUCCESS => rc,
-                            .AGAIN => {
-                                // Socket buffer full — brief spin, then retry.
-                                // TODO: For production, register EPOLLOUT and yield.
-                                std.atomic.spinLoopHint();
-                                continue;
-                            },
-                            else => return error.WriteFailed,
-                        };
-
-                        if (n == 0) return error.ConnectionClosed;
-                        total_written += n;
-
-                        // Advance iov past already-written bytes
-                        var remaining = n;
-                        for (&iov) |*v| {
-                            if (remaining >= v.len) {
-                                remaining -= v.len;
-                                v.base += v.len;
-                                v.len = 0;
-                            } else {
-                                v.base += remaining;
-                                v.len -= remaining;
-                                break;
-                            }
-                        }
+                    if (response.len > response_buffer.len) {
+                        return error.ResponseTooLarge;
                     }
 
-                    _ = self.requests_processed.fetchAdd(1, .monotonic);
-
-                    // Reset for next message
-                    conn.state = .reading_header;
-                    conn.header_pos = 0;
-                    conn.body_pos = 0;
-                    if (conn.large_buffer) |buf| {
-                        self.allocator.free(buf);
-                        conn.large_buffer = null;
+                    const response_buf_start = @intFromPtr(response_buffer.ptr);
+                    const response_buf_end = response_buf_start + response_buffer.len;
+                    const response_start = @intFromPtr(response.ptr);
+                    const response_end = response_start + response.len;
+                    if (response_start < response_buf_start or response_end > response_buf_end) {
+                        @memcpy(response_buffer[0..response.len], response);
+                    } else if (response_start != response_buf_start) {
+                        std.mem.copyForwards(u8, response_buffer[0..response.len], response);
                     }
+
+                    conn.write_buffer[0] = conn.msg_type;
+                    std.mem.writeInt(u32, conn.write_buffer[1..5], @as(u32, @intCast(response.len)), .big);
+                    conn.write_pos = 0;
+                    conn.write_len = 5 + response.len;
+                    conn.state = .writing_response;
+
+                    try self.flushWrite(conn);
+                    if (conn.state == .writing_response) return;
 
                     continue;
                 },
@@ -371,10 +337,6 @@ pub const EpollWorker = struct {
         conn.body_pos = 0;
         conn.write_pos = 0;
         conn.write_len = 0;
-        if (conn.large_buffer) |buf| {
-            self.allocator.free(buf);
-            conn.large_buffer = null;
-        }
 
         try self.modifyInterest(conn.fd, linux.EPOLL.IN | linux.EPOLL.ET | linux.EPOLL.RDHUP);
     }

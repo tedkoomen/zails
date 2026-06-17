@@ -25,6 +25,7 @@ const STATE_REQUEST_READY: u32 = 2;
 const STATE_PROCESSING: u32 = 3;
 const STATE_RESPONSE_READY: u32 = 4;
 const STATE_FAILED: u32 = 5;
+const STATE_ABANDONED: u32 = 6;
 
 const RingHeader = extern struct {
     magic: u64 = RING_MAGIC,
@@ -80,6 +81,17 @@ pub const ClientStats = struct {
     fallback_reason: []const u8 = "",
 };
 
+const CachedRing = struct {
+    port: u16,
+    server_id: u128,
+    mapped: []align(std.heap.page_size_min) u8,
+    ring: *SharedRing,
+};
+
+const ClientCache = struct {
+    threadlocal var ring: ?CachedRing = null;
+};
+
 pub fn isLoopbackHost(host: []const u8) bool {
     return std.mem.eql(u8, host, "localhost") or
         std.mem.eql(u8, host, "127.0.0.1") or
@@ -101,8 +113,22 @@ pub fn tryRequest(
         if (stats) |s| s.fallback_reason = "target is not loopback";
         return null;
     }
-    if (request_data.len > SLOT_PAYLOAD_BYTES or response_buffer.len < SLOT_PAYLOAD_BYTES) {
-        if (stats) |s| s.fallback_reason = "payload or response buffer too large for local ipc slot";
+    if (request_data.len > SLOT_PAYLOAD_BYTES or response_buffer.len == 0) {
+        if (stats) |s| s.fallback_reason = "payload too large or response buffer empty for local ipc slot";
+        return null;
+    }
+
+    if (getCachedRing(port)) |ring| {
+        const response = try requestViaRing(ring, msg_type, request_data, response_buffer, timeout_us);
+        if (response) |data| {
+            if (stats) |s| {
+                s.used_local_ipc = true;
+                s.fallback_reason = "";
+            }
+            return data;
+        }
+        clearCachedRing();
+        if (stats) |s| s.fallback_reason = "cached local ipc request failed";
         return null;
     }
 
@@ -129,18 +155,22 @@ pub fn tryRequest(
         if (stats) |s| s.fallback_reason = "ring mmap failed";
         return null;
     };
-    defer std.posix.munmap(mapped);
-
     const ring: *SharedRing = @ptrCast(@alignCast(mapped.ptr));
     if (!validateRing(ring, entry)) {
+        std.posix.munmap(mapped);
         if (stats) |s| s.fallback_reason = "ring validation failed";
         return null;
     }
 
+    cacheRing(port, entry.serverId(), mapped);
+
     const response = try requestViaRing(ring, msg_type, request_data, response_buffer, timeout_us);
+    if (response == null) {
+        clearCachedRing();
+    }
     if (stats) |s| {
-        s.used_local_ipc = true;
-        s.fallback_reason = "";
+        s.used_local_ipc = response != null;
+        s.fallback_reason = if (response == null) "local ipc request failed" else "";
     }
     return response;
 }
@@ -158,6 +188,7 @@ pub fn LocalIpcServer(comptime RegistryType: type) type {
         ring: *SharedRing,
         ring_path: []u8,
         registrar_path: []u8,
+        arena: std.heap.ArenaAllocator,
         shutdown: std.atomic.Value(bool),
         thread: ?std.Thread,
 
@@ -204,6 +235,7 @@ pub fn LocalIpcServer(comptime RegistryType: type) type {
                 .ring = ring,
                 .ring_path = ring_path,
                 .registrar_path = registrar_path,
+                .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
                 .shutdown = std.atomic.Value(bool).init(false),
                 .thread = null,
             };
@@ -228,6 +260,7 @@ pub fn LocalIpcServer(comptime RegistryType: type) type {
             std.posix.munmap(self.mapped);
             self.ring_file.close();
             std.fs.deleteFileAbsolute(self.ring_path) catch {};
+            self.arena.deinit();
             self.allocator.free(self.registrar_path);
             self.allocator.free(self.ring_path);
         }
@@ -241,7 +274,7 @@ pub fn LocalIpcServer(comptime RegistryType: type) type {
             while (!self.shutdown.load(.acquire) and
                 @atomicLoad(u32, &self.ring.header.shutdown, .acquire) == 0)
             {
-                if (processReadySlots(RegistryType, self.ring, self.registry) == 0) {
+                if (processReadySlots(RegistryType, self.ring, self.registry, &self.arena) == 0) {
                     std.atomic.spinLoopHint();
                     std.Thread.yield() catch {};
                 }
@@ -250,7 +283,12 @@ pub fn LocalIpcServer(comptime RegistryType: type) type {
     };
 }
 
-fn processReadySlots(comptime RegistryType: type, ring: *SharedRing, registry: *RegistryType) usize {
+fn processReadySlots(
+    comptime RegistryType: type,
+    ring: *SharedRing,
+    registry: *RegistryType,
+    arena: *std.heap.ArenaAllocator,
+) usize {
     var processed: usize = 0;
     for (&ring.slots) |*slot| {
         if (@cmpxchgStrong(
@@ -261,19 +299,44 @@ fn processReadySlots(comptime RegistryType: type, ring: *SharedRing, registry: *
             .acquire,
             .monotonic,
         ) == null) {
-            processSlotWithRegistry(RegistryType, registry, slot);
+            processSlotWithRegistry(RegistryType, registry, slot, arena);
             processed += 1;
         }
     }
     return processed;
 }
 
-fn processSlotWithRegistry(comptime RegistryType: type, registry: *RegistryType, slot: *Slot) void {
+fn responseStartsAtSlot(slot: *const Slot, data: []const u8) bool {
+    return @intFromPtr(data.ptr) == @intFromPtr(&slot.response_data);
+}
+
+fn finishSlot(slot: *Slot, final_state: u32) void {
+    if (@cmpxchgStrong(
+        u32,
+        &slot.state,
+        STATE_PROCESSING,
+        final_state,
+        .release,
+        .acquire,
+    )) |state| {
+        if (state == STATE_ABANDONED) {
+            slot.response_len = 0;
+            slot.error_code = 0;
+            @atomicStore(u32, &slot.state, STATE_EMPTY, .release);
+        }
+    }
+}
+
+fn processSlotWithRegistry(
+    comptime RegistryType: type,
+    registry: *RegistryType,
+    slot: *Slot,
+    arena: *std.heap.ArenaAllocator,
+) void {
+    defer _ = arena.reset(.retain_capacity);
+
     const request_len = @min(slot.request_len, SLOT_PAYLOAD_BYTES);
     const request_data = slot.request_data[0..request_len];
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
 
     const handler_response = registry.handle(
         slot.msg_type,
@@ -283,13 +346,17 @@ fn processSlotWithRegistry(comptime RegistryType: type, registry: *RegistryType,
     );
 
     if (handler_response.isOk()) {
-        slot.response_len = @intCast(@min(handler_response.data.len, SLOT_PAYLOAD_BYTES));
+        const response_len = @min(handler_response.data.len, SLOT_PAYLOAD_BYTES);
+        slot.response_len = @intCast(response_len);
+        if (!responseStartsAtSlot(slot, handler_response.data)) {
+            @memcpy(slot.response_data[0..response_len], handler_response.data[0..response_len]);
+        }
         slot.error_code = 0;
-        @atomicStore(u32, &slot.state, STATE_RESPONSE_READY, .release);
+        finishSlot(slot, STATE_RESPONSE_READY);
     } else {
         slot.response_len = 0;
         slot.error_code = @intCast(@intFromEnum(handler_response.error_code));
-        @atomicStore(u32, &slot.state, STATE_FAILED, .release);
+        finishSlot(slot, STATE_FAILED);
     }
 }
 
@@ -335,6 +402,45 @@ fn validateRing(ring: *SharedRing, entry: RegistrarEntry) bool {
         @atomicLoad(u32, &ring.header.shutdown, .acquire) == 0;
 }
 
+fn validateCachedRing(ring: *SharedRing, port: u16, server_id: u128) bool {
+    return ring.header.magic == RING_MAGIC and
+        ring.header.version == VERSION and
+        ring.header.slot_count == SLOT_COUNT and
+        ring.header.slot_payload_bytes == SLOT_PAYLOAD_BYTES and
+        ring.header.port == port and
+        ring.header.server_id_hi == @as(u64, @intCast(server_id >> 64)) and
+        ring.header.server_id_lo == @as(u64, @truncate(server_id)) and
+        @atomicLoad(u32, &ring.header.ready, .acquire) == 1 and
+        @atomicLoad(u32, &ring.header.shutdown, .acquire) == 0;
+}
+
+fn getCachedRing(port: u16) ?*SharedRing {
+    if (ClientCache.ring) |cached| {
+        if (cached.port == port and validateCachedRing(cached.ring, cached.port, cached.server_id)) {
+            return cached.ring;
+        }
+        clearCachedRing();
+    }
+    return null;
+}
+
+fn cacheRing(port: u16, server_id: u128, mapped: []align(std.heap.page_size_min) u8) void {
+    clearCachedRing();
+    ClientCache.ring = .{
+        .port = port,
+        .server_id = server_id,
+        .mapped = mapped,
+        .ring = @ptrCast(@alignCast(mapped.ptr)),
+    };
+}
+
+fn clearCachedRing() void {
+    if (ClientCache.ring) |cached| {
+        std.posix.munmap(cached.mapped);
+        ClientCache.ring = null;
+    }
+}
+
 fn requestViaRing(
     ring: *SharedRing,
     msg_type: u8,
@@ -346,7 +452,7 @@ fn requestViaRing(
     const deadline = std.time.nanoTimestamp() + timeout_ns;
 
     const slot = reserveSlot(ring) orelse return null;
-    const request_id = @atomicRmw(u64, &ring.header.client_cursor, .Add, 1, .monotonic);
+    const request_id = slot.request_id;
 
     slot.msg_type = msg_type;
     slot.flags = 0;
@@ -381,8 +487,32 @@ fn requestViaRing(
         }
     }
 
-    _ = @cmpxchgStrong(u32, &slot.state, STATE_REQUEST_READY, STATE_EMPTY, .acquire, .monotonic);
-    return null;
+    while (true) {
+        const state = @atomicLoad(u32, &slot.state, .acquire);
+        switch (state) {
+            STATE_RESPONSE_READY => {
+                const response_len = @min(slot.response_len, @as(u32, @intCast(response_buffer.len)));
+                @memcpy(response_buffer[0..response_len], slot.response_data[0..response_len]);
+                @atomicStore(u32, &slot.state, STATE_EMPTY, .release);
+                return response_buffer[0..response_len];
+            },
+            STATE_FAILED => {
+                @atomicStore(u32, &slot.state, STATE_EMPTY, .release);
+                return null;
+            },
+            STATE_REQUEST_READY => {
+                if (@cmpxchgStrong(u32, &slot.state, STATE_REQUEST_READY, STATE_EMPTY, .acquire, .monotonic) == null) {
+                    return null;
+                }
+            },
+            STATE_PROCESSING => {
+                if (@cmpxchgStrong(u32, &slot.state, STATE_PROCESSING, STATE_ABANDONED, .acq_rel, .monotonic) == null) {
+                    return null;
+                }
+            },
+            else => return null,
+        }
+    }
 }
 
 fn reserveSlot(ring: *SharedRing) ?*Slot {
@@ -398,6 +528,7 @@ fn reserveSlot(ring: *SharedRing) ?*Slot {
             .acquire,
             .monotonic,
         ) == null) {
+            slot.request_id = start;
             return slot;
         }
     }
@@ -517,6 +648,25 @@ fn skipUnlessLinux() !void {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 }
 
+const TestError = enum(u8) { none = 0, handler_failed = 31 };
+
+const TestResponse = struct {
+    data: []const u8,
+    error_code: TestError,
+
+    fn ok(data: []const u8) TestResponse {
+        return .{ .data = data, .error_code = .none };
+    }
+
+    fn err(error_code: TestError) TestResponse {
+        return .{ .data = "", .error_code = error_code };
+    }
+
+    fn isOk(self: TestResponse) bool {
+        return self.error_code == .none;
+    }
+};
+
 test "loopback host detection" {
     try skipUnlessLinux();
 
@@ -571,6 +721,8 @@ test "simulation processes ready slot and returns response" {
 
     var ring = SharedRing{};
     var registry = MockRegistry{};
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
     initializeRing(&ring, 39184, 0x1234);
 
     const slot = reserveSlot(&ring) orelse return error.NoSlotReserved;
@@ -586,7 +738,7 @@ test "simulation processes ready slot and returns response" {
 
     try std.testing.expectEqual(
         @as(usize, 1),
-        processReadySlots(MockRegistry, &ring, &registry),
+        processReadySlots(MockRegistry, &ring, &registry, &arena),
     );
     try std.testing.expectEqual(@as(u32, 1), registry.handled);
     try std.testing.expectEqual(@as(u8, 7), registry.last_msg_type);
@@ -636,6 +788,8 @@ test "simulation marks failed slot when registry returns error" {
 
     var ring = SharedRing{};
     var registry = MockRegistry{};
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
     initializeRing(&ring, 39185, 0x5678);
 
     const slot = reserveSlot(&ring) orelse return error.NoSlotReserved;
@@ -646,7 +800,7 @@ test "simulation marks failed slot when registry returns error" {
 
     try std.testing.expectEqual(
         @as(usize, 1),
-        processReadySlots(MockRegistry, &ring, &registry),
+        processReadySlots(MockRegistry, &ring, &registry, &arena),
     );
     try std.testing.expectEqual(
         STATE_FAILED,
@@ -732,7 +886,7 @@ test "tryRequest fallback decisions avoid filesystem access" {
     try std.testing.expect(oversized == null);
     try std.testing.expect(!stats.used_local_ipc);
     try std.testing.expectEqualStrings(
-        "payload or response buffer too large for local ipc slot",
+        "payload too large or response buffer empty for local ipc slot",
         stats.fallback_reason,
     );
 }
@@ -789,4 +943,272 @@ test "local ipc round trip with mock registry" {
     )) orelse return error.NoLocalIpcResponse;
 
     try std.testing.expectEqualStrings("hello-shm", response);
+}
+
+test "local ipc handles concurrent clients on one ring" {
+    try skipUnlessLinux();
+    clearCachedRing();
+    defer clearCachedRing();
+
+    const port: u16 = 39195;
+    const client_count = 8;
+    const requests_per_client = 100;
+
+    const MockRegistry = struct {
+        handled: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+        fn handle(
+            self: *@This(),
+            msg_type: u8,
+            request_data: []const u8,
+            response_buffer: []u8,
+            allocator: Allocator,
+        ) TestResponse {
+            _ = msg_type;
+            _ = allocator;
+            _ = self.handled.fetchAdd(1, .monotonic);
+            @memcpy(response_buffer[0..request_data.len], request_data);
+            return TestResponse.ok(response_buffer[0..request_data.len]);
+        }
+    };
+
+    const ClientContext = struct {
+        port: u16,
+        client_id: usize,
+        failures: *std.atomic.Value(usize),
+    };
+
+    const Client = struct {
+        fn run(ctx: ClientContext) void {
+            var response_buffer: [SLOT_PAYLOAD_BYTES]u8 = undefined;
+            var request_buffer: [64]u8 = undefined;
+
+            for (0..requests_per_client) |i| {
+                const request = std.fmt.bufPrint(
+                    &request_buffer,
+                    "client-{d}-request-{d}",
+                    .{ ctx.client_id, i },
+                ) catch {
+                    _ = ctx.failures.fetchAdd(1, .monotonic);
+                    continue;
+                };
+
+                const response = tryRequest(
+                    std.heap.page_allocator,
+                    "localhost",
+                    ctx.port,
+                    1,
+                    request,
+                    &response_buffer,
+                    500_000,
+                    null,
+                ) catch {
+                    _ = ctx.failures.fetchAdd(1, .monotonic);
+                    continue;
+                };
+
+                const payload = response orelse {
+                    _ = ctx.failures.fetchAdd(1, .monotonic);
+                    continue;
+                };
+
+                if (!std.mem.eql(u8, request, payload)) {
+                    _ = ctx.failures.fetchAdd(1, .monotonic);
+                }
+            }
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var registry = MockRegistry{};
+    const Server = LocalIpcServer(MockRegistry);
+    var server = try Server.init(allocator, port, &registry);
+    defer server.deinit();
+    try server.start();
+
+    var failures = std.atomic.Value(usize).init(0);
+    var threads: [client_count]std.Thread = undefined;
+    for (&threads, 0..) |*thread, client_id| {
+        thread.* = try std.Thread.spawn(.{}, Client.run, .{ClientContext{
+            .port = port,
+            .client_id = client_id,
+            .failures = &failures,
+        }});
+    }
+
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), failures.load(.acquire));
+    try std.testing.expectEqual(
+        @as(u64, client_count * requests_per_client),
+        registry.handled.load(.acquire),
+    );
+}
+
+test "local ipc timeout while processing abandons and recycles slot" {
+    try skipUnlessLinux();
+
+    const SlowRegistry = struct {
+        entered: *std.atomic.Value(bool),
+
+        fn handle(
+            self: *@This(),
+            msg_type: u8,
+            request_data: []const u8,
+            response_buffer: []u8,
+            allocator: Allocator,
+        ) TestResponse {
+            _ = msg_type;
+            _ = allocator;
+            self.entered.store(true, .release);
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            @memcpy(response_buffer[0..request_data.len], request_data);
+            return TestResponse.ok(response_buffer[0..request_data.len]);
+        }
+    };
+
+    const ServerContext = struct {
+        ring: *SharedRing,
+        registry: *SlowRegistry,
+        arena: *std.heap.ArenaAllocator,
+        processed: *std.atomic.Value(bool),
+    };
+
+    const ServerWorker = struct {
+        fn run(ctx: ServerContext) void {
+            while (!ctx.processed.load(.acquire)) {
+                if (processReadySlots(SlowRegistry, ctx.ring, ctx.registry, ctx.arena) > 0) {
+                    ctx.processed.store(true, .release);
+                    return;
+                }
+                std.atomic.spinLoopHint();
+            }
+        }
+    };
+
+    const ClientContext = struct {
+        ring: *SharedRing,
+        timed_out: *std.atomic.Value(bool),
+        completed: *std.atomic.Value(bool),
+    };
+
+    const ClientWorker = struct {
+        fn run(ctx: ClientContext) void {
+            var response_buffer: [SLOT_PAYLOAD_BYTES]u8 = undefined;
+            const response = requestViaRing(ctx.ring, 1, "slow", &response_buffer, 20_000) catch null;
+            ctx.timed_out.store(response == null, .release);
+            ctx.completed.store(true, .release);
+        }
+    };
+
+    var ring = SharedRing{};
+    initializeRing(&ring, 39196, 0xfeed_beef);
+    var entered = std.atomic.Value(bool).init(false);
+    var registry = SlowRegistry{ .entered = &entered };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var processed = std.atomic.Value(bool).init(false);
+    var timed_out = std.atomic.Value(bool).init(false);
+    var completed = std.atomic.Value(bool).init(false);
+
+    const client_thread = try std.Thread.spawn(.{}, ClientWorker.run, .{ClientContext{
+        .ring = &ring,
+        .timed_out = &timed_out,
+        .completed = &completed,
+    }});
+    const server_thread = try std.Thread.spawn(.{}, ServerWorker.run, .{ServerContext{
+        .ring = &ring,
+        .registry = &registry,
+        .arena = &arena,
+        .processed = &processed,
+    }});
+
+    var waited_ns: u64 = 0;
+    while (!entered.load(.acquire) and waited_ns < 500 * std.time.ns_per_ms) {
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+        waited_ns += 1 * std.time.ns_per_ms;
+    }
+
+    try std.testing.expect(entered.load(.acquire));
+    client_thread.join();
+    server_thread.join();
+
+    try std.testing.expect(completed.load(.acquire));
+    try std.testing.expect(timed_out.load(.acquire));
+    try std.testing.expect(processed.load(.acquire));
+    for (&ring.slots) |*slot| {
+        try std.testing.expectEqual(STATE_EMPTY, @atomicLoad(u32, &slot.state, .acquire));
+    }
+}
+
+test "local ipc clears stale cached ring after server restart" {
+    try skipUnlessLinux();
+    clearCachedRing();
+    defer clearCachedRing();
+
+    const port: u16 = 39197;
+    const PrefixRegistry = struct {
+        prefix: []const u8,
+
+        fn handle(
+            self: *@This(),
+            msg_type: u8,
+            request_data: []const u8,
+            response_buffer: []u8,
+            allocator: Allocator,
+        ) TestResponse {
+            _ = msg_type;
+            _ = allocator;
+            const total_len = self.prefix.len + request_data.len;
+            if (total_len > response_buffer.len) return TestResponse.err(.handler_failed);
+            @memcpy(response_buffer[0..self.prefix.len], self.prefix);
+            @memcpy(response_buffer[self.prefix.len..total_len], request_data);
+            return TestResponse.ok(response_buffer[0..total_len]);
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var response_buffer: [SLOT_PAYLOAD_BYTES]u8 = undefined;
+
+    {
+        var registry = PrefixRegistry{ .prefix = "one:" };
+        const Server = LocalIpcServer(PrefixRegistry);
+        var server = try Server.init(allocator, port, &registry);
+        defer server.deinit();
+        try server.start();
+
+        const response = (try tryRequest(
+            allocator,
+            "localhost",
+            port,
+            1,
+            "ping",
+            &response_buffer,
+            DEFAULT_TIMEOUT_US,
+            null,
+        )) orelse return error.NoLocalIpcResponse;
+        try std.testing.expectEqualStrings("one:ping", response);
+    }
+
+    {
+        var registry = PrefixRegistry{ .prefix = "two:" };
+        const Server = LocalIpcServer(PrefixRegistry);
+        var server = try Server.init(allocator, port, &registry);
+        defer server.deinit();
+        try server.start();
+
+        const response = (try tryRequest(
+            allocator,
+            "localhost",
+            port,
+            1,
+            "ping",
+            &response_buffer,
+            DEFAULT_TIMEOUT_US,
+            null,
+        )) orelse return error.NoLocalIpcResponse;
+        try std.testing.expectEqualStrings("two:ping", response);
+    }
 }

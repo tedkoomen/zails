@@ -207,7 +207,7 @@ fn testLatency(allocator: Allocator, config: BenchmarkConfig) !void {
 
         // Measure publish latency
         const start = std.time.nanoTimestamp();
-        bus.publish(event);
+        _ = bus.publish(event);
         const latency_ns = @as(u64, @intCast(std.time.nanoTimestamp() - start));
 
         try global_stats.recordPublish(latency_ns);
@@ -284,7 +284,7 @@ fn testThroughput(allocator: Allocator, config: BenchmarkConfig) !void {
             .data = data,
         };
 
-        bus.publish(event);
+        _ = bus.publish(event);
         event_id += 1;
 
         // Check for queue overflow
@@ -370,7 +370,7 @@ fn testStress(allocator: Allocator, config: BenchmarkConfig) !void {
             .data = data,
         };
 
-        bus.publish(event);
+        _ = bus.publish(event);
         event_id += 1;
 
         if (event_id % 5000 == 0) {

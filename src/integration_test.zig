@@ -7,7 +7,6 @@
 /// 3. Message bus delivers event to subscribers
 /// 4. Subscribers execute callbacks
 /// 5. Multiple handlers can coordinate via events
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const net = std.net;
@@ -162,16 +161,13 @@ const MockItemHandler = struct {
         const item_id = obj.get("item_id").?.integer;
         const name = obj.get("name").?.string;
 
-        std.debug.print("Handler processing: action={s}, item_id={d}, name={s}\n", .{action, item_id, name});
+        std.debug.print("Handler processing: action={s}, item_id={d}, name={s}\n", .{ action, item_id, name });
 
         // Publish event based on action
         if (context.message_bus) |bus| {
             // Format event data
             var event_data_buf: [256]u8 = undefined;
-            const event_data = try std.fmt.bufPrint(&event_data_buf,
-                "{{\"item_id\":{d},\"name\":\"{s}\"}}",
-                .{item_id, name}
-            );
+            const event_data = try std.fmt.bufPrint(&event_data_buf, "{{\"item_id\":{d},\"name\":\"{s}\"}}", .{ item_id, name });
 
             if (std.mem.eql(u8, action, "create")) {
                 // Create owned event (allocates and copies all string data)
@@ -184,7 +180,7 @@ const MockItemHandler = struct {
                     event_data,
                 );
                 std.debug.print("→ Published Item.created event (data: {s})\n", .{event_data});
-                bus.publish(event);
+                _ = bus.publish(event);
             } else if (std.mem.eql(u8, action, "update")) {
                 // Create owned event (allocates and copies all string data)
                 const event = try Event.initOwned(
@@ -196,15 +192,12 @@ const MockItemHandler = struct {
                     event_data,
                 );
                 std.debug.print("→ Published Item.updated event\n", .{});
-                bus.publish(event);
+                _ = bus.publish(event);
             }
         }
 
         // Build response
-        return try std.fmt.bufPrint(response_buffer,
-            "{{\"status\":\"success\",\"action\":\"{s}\",\"item_id\":{d}}}",
-            .{action, item_id}
-        );
+        return try std.fmt.bufPrint(response_buffer, "{{\"status\":\"success\",\"action\":\"{s}\",\"item_id\":{d}}}", .{ action, item_id });
     }
 };
 
@@ -352,10 +345,7 @@ fn test_event_chain(allocator: Allocator, config: TestConfig) !void {
             const globals = @import("globals.zig");
             if (globals.global_message_bus) |g_bus| {
                 var data_buf: [256]u8 = undefined;
-                const data = std.fmt.bufPrint(&data_buf,
-                    "{{\"processed_from\":{d}}}",
-                    .{event.model_id}
-                ) catch return;
+                const data = std.fmt.bufPrint(&data_buf, "{{\"processed_from\":{d}}}", .{event.model_id}) catch return;
 
                 // Create owned event
                 const processed_event = Event.initOwned(
@@ -367,7 +357,7 @@ fn test_event_chain(allocator: Allocator, config: TestConfig) !void {
                     data,
                 ) catch return;
 
-                g_bus.publish(processed_event);
+                _ = g_bus.publish(processed_event);
             }
         }
     }.onCreated;
@@ -478,9 +468,9 @@ fn test_filtered_subscriptions(allocator: Allocator, config: TestConfig) !void {
 
     // Send requests with different IDs
     const requests = [_][]const u8{
-        "{\"action\":\"create\",\"item_id\":10,\"name\":\"low_id\"}",    // Not matched by filter
-        "{\"action\":\"create\",\"item_id\":100,\"name\":\"high_id\"}",  // Matched!
-        "{\"action\":\"create\",\"item_id\":25,\"name\":\"mid_id\"}",    // Not matched
+        "{\"action\":\"create\",\"item_id\":10,\"name\":\"low_id\"}", // Not matched by filter
+        "{\"action\":\"create\",\"item_id\":100,\"name\":\"high_id\"}", // Matched!
+        "{\"action\":\"create\",\"item_id\":25,\"name\":\"mid_id\"}", // Not matched
         "{\"action\":\"create\",\"item_id\":75,\"name\":\"high_id_2\"}", // Matched!
     };
 

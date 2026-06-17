@@ -28,6 +28,17 @@ pub fn build(b: *std.Build) void {
     root_module.addImport("handlers", handlers_module);
     root_module.addImport("result", result_module);
 
+    // Public runtime module for applications that depend on Zails as a library:
+    // const zails = @import("zails");
+    const runtime_module = b.addModule("zails", .{
+        .root_source_file = b.path("src/runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    runtime_module.addImport("result", result_module);
+    b.installFile("include/zails/zails.h", "include/zails/zails.h");
+    b.installFile("include/zails/zails.hpp", "include/zails/zails.hpp");
+
     // Main server executable
     const exe = b.addExecutable(.{
         .name = "server",
@@ -54,6 +65,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     const message_bus_test_step = b.step("test-message-bus", "Run message bus module tests (including event_builder)");
     const sim_test_step = b.step("test-simulation", "Run deterministic simulation tests");
+    const cpp_runtime_test_step = b.step("test-cpp-runtime", "Run C++ foreign-worker runtime integration tests");
 
     if (target.result.os.tag == .linux) {
         const test_module = b.createModule(.{
@@ -82,6 +94,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "config_system_tests", .path = "src/config_system.zig" },
             .{ .name = "proto_tests", .path = "src/proto.zig" },
             .{ .name = "event_tests", .path = "src/event.zig" },
+            .{ .name = "foreign_handler_tests", .path = "src/foreign_handler.zig", .needs_result = true },
+            .{ .name = "runtime_tests", .path = "src/runtime.zig", .needs_result = true },
             .{ .name = "local_ipc_tests", .path = "src/local_ipc.zig" },
             .{ .name = "query_builder_tests", .path = "src/orm/query_builder.zig" },
             .{ .name = "model_tests", .path = "src/orm/model.zig" },
@@ -127,6 +141,7 @@ pub fn build(b: *std.Build) void {
 
         const run_message_bus_tests = b.addRunArtifact(message_bus_tests);
         message_bus_test_step.dependOn(&run_message_bus_tests.step);
+        test_step.dependOn(&run_message_bus_tests.step);
 
         const sim_test_module = b.createModule(.{
             .root_source_file = b.path("src/simulation_test.zig"),
@@ -141,6 +156,45 @@ pub fn build(b: *std.Build) void {
 
         const run_sim_tests = b.addRunArtifact(sim_tests);
         sim_test_step.dependOn(&run_sim_tests.step);
+        test_step.dependOn(&run_sim_tests.step);
+
+        const cpp_worker_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        cpp_worker_module.addCSourceFile(.{
+            .file = b.path("tests/cpp_runtime_worker.cpp"),
+            .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti", "-Iinclude" },
+        });
+
+        const cpp_worker = b.addExecutable(.{
+            .name = "cpp_runtime_worker",
+            .root_module = cpp_worker_module,
+        });
+        const install_cpp_worker = b.addInstallArtifact(cpp_worker, .{});
+
+        const cpp_runtime_options = b.addOptions();
+        cpp_runtime_options.addOption([]const u8, "worker_path", b.getInstallPath(.bin, "cpp_runtime_worker"));
+        cpp_runtime_options.addOption(u16, "worker_port", 39091);
+
+        const cpp_runtime_test_module = b.createModule(.{
+            .root_source_file = b.path("src/cpp_runtime_integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        cpp_runtime_test_module.addImport("zails", runtime_module);
+        cpp_runtime_test_module.addOptions("cpp_runtime_options", cpp_runtime_options);
+
+        const cpp_runtime_tests = b.addTest(.{
+            .name = "cpp_runtime_integration_tests",
+            .root_module = cpp_runtime_test_module,
+        });
+        const run_cpp_runtime_tests = b.addRunArtifact(cpp_runtime_tests);
+        run_cpp_runtime_tests.step.dependOn(&install_cpp_worker.step);
+        test_step.dependOn(&run_cpp_runtime_tests.step);
+        cpp_runtime_test_step.dependOn(&run_cpp_runtime_tests.step);
     }
 
     // Zails CLI tool
@@ -171,6 +225,21 @@ pub fn build(b: *std.Build) void {
     const zails_run_step = b.step("zails", "Run the zails CLI");
     zails_run_step.dependOn(&zails_run_cmd.step);
 
+    const runtime_example_module = b.createModule(.{
+        .root_source_file = b.path("examples/runtime_app_example.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    runtime_example_module.addImport("zails", runtime_module);
+
+    const runtime_example_exe = b.addExecutable(.{
+        .name = "runtime_app_example",
+        .root_module = runtime_example_module,
+    });
+
+    const runtime_example_step = b.step("runtime-example", "Build the importable runtime app example");
+    runtime_example_step.dependOn(&b.addInstallArtifact(runtime_example_exe, .{}).step);
+
     // Test harness for load testing
     _ = addExeWithRunStep(b, "test_harness", "src/test_harness.zig", "load-test", "Run load tests", target, optimize);
 
@@ -179,6 +248,9 @@ pub fn build(b: *std.Build) void {
 
     // Message Bus Benchmark
     _ = addExeWithRunStep(b, "message_bus_benchmark", "src/message_bus_benchmark.zig", "message-bus-bench", "Run message bus benchmark", target, optimize);
+
+    // Allocation probe for valgrind/massif validation of hot paths.
+    _ = addExeWithRunStep(b, "allocation_probe", "src/allocation_probe.zig", "allocation-probe", "Run allocation probe", target, optimize);
 
     // Integration Test (TCP → Handler → Message Bus → Subscriber)
     _ = addExeWithRunStep(b, "integration_test", "src/integration_test.zig", "integration-test", "Run integration tests", target, optimize);

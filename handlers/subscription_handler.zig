@@ -53,6 +53,7 @@ const SubscribeError = error{
     OutOfMemory,
 };
 
+var bridge_lock = std.Thread.Mutex{};
 var bridge_context: ?*Context = null;
 
 const QueuedEvent = struct {
@@ -200,11 +201,19 @@ pub const Context = struct {
 
     pub fn postInit(self: *Context, allocator: Allocator) !void {
         self.allocator = allocator;
+        bridge_lock.lock();
+        defer bridge_lock.unlock();
         bridge_context = self;
         std.log.info("✓ External subscription handler initialized (message type {d})", .{MESSAGE_TYPE});
     }
 
     pub fn deinit(self: *Context) void {
+        bridge_lock.lock();
+        if (bridge_context == self) {
+            bridge_context = null;
+        }
+        bridge_lock.unlock();
+
         self.lock.lock();
         defer self.lock.unlock();
 
@@ -214,10 +223,6 @@ pub const Context = struct {
                     _ = globals.unsubscribeExternalEvent(slot.bus_subscription_id);
                 }
             }
-        }
-
-        if (bridge_context == self) {
-            bridge_context = null;
         }
     }
 
@@ -354,6 +359,8 @@ pub const Context = struct {
 };
 
 fn onExternalEvent(event: *const ExternalEvent) void {
+    bridge_lock.lock();
+    defer bridge_lock.unlock();
     if (bridge_context) |context| {
         context.enqueueMatching(event);
     }
@@ -541,22 +548,14 @@ fn handlePoll(context: *Context, obj: std.json.ObjectMap, response_buffer: []u8)
     const subscription_id = getU64(obj, "subscription_id", null) orelse {
         return writeError(response_buffer, "missing subscription_id");
     };
-    const timeout_ms_raw = getU64(obj, "timeout_ms", 0) orelse 0;
-    const timeout_ms = @min(timeout_ms_raw, MAX_POLL_TIMEOUT_MS);
-    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    _ = getU64(obj, "timeout_ms", 0) orelse 0;
 
-    while (true) {
-        if (context.popEvent(subscription_id)) |event| {
-            const depth = context.queueDepth(subscription_id) orelse 0;
-            return writeEventResponse(response_buffer, subscription_id, event, depth);
-        }
-
-        if (timeout_ms == 0 or std.time.milliTimestamp() >= deadline) {
-            return writeTimeoutResponse(response_buffer, subscription_id);
-        }
-
-        std.Thread.sleep(std.time.ns_per_ms);
+    if (context.popEvent(subscription_id)) |event| {
+        const depth = context.queueDepth(subscription_id) orelse 0;
+        return writeEventResponse(response_buffer, subscription_id, event, depth);
     }
+
+    return writeTimeoutResponse(response_buffer, subscription_id);
 }
 
 fn handlePublish(context: *Context, obj: std.json.ObjectMap, response_buffer: []u8) result.HandlerResponse {

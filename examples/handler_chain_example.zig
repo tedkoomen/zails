@@ -302,7 +302,7 @@ pub fn main() !void {
     };
 
     std.log.info("\n🚀 Publishing Trade.request event...\n", .{});
-    bus.publish(request_event);
+    _ = bus.publish(request_event);
 
     // Wait for chain reaction to complete
     std.log.info("\nWaiting for chain reaction...\n", .{});
@@ -366,7 +366,7 @@ pub fn main() !void {
     };
 
     std.log.info("\n🚀 Publishing large Trade.request event...\n", .{});
-    bus.publish(large_event);
+    _ = bus.publish(large_event);
 
     std.Thread.sleep(500 * std.time.ns_per_ms);
 

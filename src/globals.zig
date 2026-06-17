@@ -136,7 +136,7 @@ pub fn publishExternalEvent(
         model_id,
         data,
     );
-    bus.publish(event);
+    _ = bus.publish(event);
 }
 
 fn handleExternalBusEvent(event: *const message_bus_mod.Event, allocator: Allocator) void {

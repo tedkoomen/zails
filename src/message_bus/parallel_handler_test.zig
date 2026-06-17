@@ -85,7 +85,7 @@ test "handlers execute in parallel" {
         .data = "{}",
     };
 
-    bus.publish(event);
+    _ = bus.publish(event);
 
     // Wait for handlers to complete
     std.Thread.sleep(100 * std.time.ns_per_ms);
@@ -136,7 +136,7 @@ test "single handler executes inline (no threading overhead)" {
         .data = "{}",
     };
 
-    bus.publish(event);
+    _ = bus.publish(event);
 
     // Wait for delivery
     std.Thread.sleep(50 * std.time.ns_per_ms);

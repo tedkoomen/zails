@@ -43,7 +43,7 @@ test "message bus full integration" {
         .data = "{\"value\":42}",
     };
 
-    bus.publish(event);
+    _ = bus.publish(event);
 
     // Check stats
     const stats = bus.getStats();
@@ -89,7 +89,7 @@ test "message bus with filters" {
         .model_id = 1,
         .data = "{\"symbol\":\"AAPL\",\"price\":500}",
     };
-    bus.publish(low_event);
+    _ = bus.publish(low_event);
 
     // Publish high-value trade (should match)
     const high_event = Event{
@@ -101,7 +101,7 @@ test "message bus with filters" {
         .model_id = 2,
         .data = "{\"symbol\":\"TSLA\",\"price\":15000}",
     };
-    bus.publish(high_event);
+    _ = bus.publish(high_event);
 
     const stats = bus.getStats();
     try testing.expectEqual(@as(u64, 2), stats.published);

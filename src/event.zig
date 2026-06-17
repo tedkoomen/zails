@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const proto = @import("proto.zig");
+const payload_pool = @import("message_bus/payload_pool.zig");
 
 /// Maximum number of typed fields per event for filtering
 pub const MAX_EVENT_FIELDS = 8;
@@ -58,14 +59,22 @@ pub const Field = struct {
 /// Event payload for message bus
 ///
 /// Memory ownership:
-/// - Events created with initOwned() own their string data and must call deinit()
-/// - Events created with struct literal syntax don't own data (caller manages lifetime)
-/// - Check 'owned' field to determine if deinit() should be called
+/// - Events created with initOwned() own heap metadata and heap payload bytes.
+/// - Events published through MessageBus with borrowed bytes are copied into
+///   a preallocated payload pool before they are enqueued.
+/// - Events created with struct literal syntax remain borrowed until publish.
+/// - deinit() releases heap or pooled payload ownership based on payload_owner.
 ///
 /// TODO(perf): This struct is ~400+ bytes (8 Fields × ~42 bytes each + metadata) and is
 /// copied by value through the ring buffer on every push/pop. Consider indirecting via
 /// pointer (pool-allocated Event*) if profiling shows memcpy as a bottleneck.
 pub const Event = struct {
+    pub const PayloadOwner = union(enum) {
+        borrowed,
+        heap,
+        pooled: payload_pool.PayloadHandle,
+    };
+
     id: u128, // UUID (generated with std.Random)
     timestamp: i64, // Unix timestamp microseconds
     event_type: EventType,
@@ -73,7 +82,8 @@ pub const Event = struct {
     model_type: []const u8, // "Trade", "Portfolio", etc.
     model_id: u64,
     data: []const u8, // Serialized model state (protobuf)
-    owned: bool = false, // If true, this Event owns its string data
+    owned: bool = false, // If true, topic and model_type are heap-owned.
+    payload_owner: PayloadOwner = .borrowed,
 
     /// Subscription ID that caused this event (0 = no source / external).
     /// Used to prevent feedback loops: the event worker skips delivery
@@ -142,6 +152,7 @@ pub const Event = struct {
             .model_id = model_id,
             .data = data_copy,
             .owned = true,
+            .payload_owner = .heap,
         };
     }
 
@@ -198,6 +209,7 @@ pub const Event = struct {
             .model_id = 0,
             .data = "",
             .owned = false, // Only set to true after all allocations succeed
+            .payload_owner = .borrowed,
         };
 
         // Track allocations for cleanup on error
@@ -322,17 +334,23 @@ pub const Event = struct {
 
         // All allocations succeeded - mark as owned
         event.owned = true;
+        event.payload_owner = .heap;
         return event;
     }
 
     pub fn deinit(self: Event, allocator: Allocator) void {
-        if (!self.owned) return;
+        if (self.owned) {
+            // Zig allocators handle zero-length slices correctly — no guard needed.
+            // Previous guards would leak zero-length owned allocations from dupe("").
+            allocator.free(self.topic);
+            allocator.free(self.model_type);
+        }
 
-        // Zig allocators handle zero-length slices correctly — no guard needed.
-        // Previous guards would leak zero-length owned allocations from dupe("").
-        allocator.free(self.topic);
-        allocator.free(self.model_type);
-        allocator.free(self.data);
+        switch (self.payload_owner) {
+            .borrowed => {},
+            .heap => allocator.free(self.data),
+            .pooled => |handle| _ = handle.pool.release(handle),
+        }
     }
 };
 

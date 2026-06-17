@@ -5,7 +5,6 @@
 /// - Compile-time topic validation
 /// - Simple, fluent API
 /// - Automatic ID and timestamp generation
-
 const std = @import("std");
 const event_mod = @import("../event.zig");
 const Event = event_mod.Event;
@@ -100,10 +99,20 @@ pub const EventBuilder = struct {
         return self.event;
     }
 
-    /// Build and publish to message bus (convenience method)
-    /// Returns true if published, false if dropped (queue full).
+    /// Build and publish to message bus (convenience method).
+    /// Borrowed topic/model/data slices are copied into the bus payload pool
+    /// before enqueueing, so stack/request-buffer data is safe for async delivery.
     pub fn publish(self: Self, bus: *MessageBus) bool {
         return bus.publish(self.event);
+    }
+
+    /// Publish without forcing a payload-pool copy.
+    /// Use only for events whose borrowed slices have static or externally
+    /// guaranteed lifetime longer than async delivery.
+    pub fn publishBorrowedUnsafe(self: Self, bus: *MessageBus) bool {
+        var event = self.event;
+        event.payload_owner = .borrowed;
+        return bus.publishBorrowedUnsafe(event);
     }
 };
 

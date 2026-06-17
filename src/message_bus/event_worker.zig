@@ -83,23 +83,21 @@ pub const EventWorker = struct {
             // Reset spin counter on successful pop
             empty_spins = 0;
 
-            // Zero-allocation matching via stack result
-            const match_result = self.message_bus.subscribers.getMatchingResult(&event);
-            const subscribers = match_result.slice();
-
-            // Sequential delivery — fast callbacks, no thread spawn overhead.
+            // Sequential delivery from a zero-allocation RCU snapshot iterator —
+            // fast callbacks, no thread spawn overhead and no fixed fanout cap.
             // Before calling each handler, set the thread-local so that any
             // ReactiveModel mutation inside the handler tags its outgoing event
             // with this subscription ID. After delivery, the event worker
             // checks source_subscription_id and skips the originating handler.
-            for (subscribers) |sub| {
+            var subscribers = self.message_bus.subscribers.matchingIterator(&event);
+            while (subscribers.next()) |sub| {
                 // Skip delivery back to the subscription that caused this event
                 if (event.source_subscription_id != 0 and sub.id == event.source_subscription_id) {
                     continue;
                 }
                 current_handler_subscription_id = sub.id;
-                defer current_handler_subscription_id = 0;
                 sub.handler(&event, allocator);
+                current_handler_subscription_id = 0;
                 _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
             }
 

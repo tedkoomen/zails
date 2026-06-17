@@ -67,6 +67,8 @@ pub const HandlerFn = @import("subscriber.zig").HandlerFn;
 
 // Internal components
 pub const EventRingBuffer = @import("ring_buffer.zig").EventRingBuffer;
+pub const PayloadPool = @import("payload_pool.zig").PayloadPool;
+pub const PayloadHandle = @import("payload_pool.zig").PayloadHandle;
 pub const SubscriberRegistry = @import("subscriber_registry.zig").SubscriberRegistry; // Legacy (uses RwLock)
 pub const LockFreeSubscriberRegistry = @import("lockfree_subscriber_registry.zig").LockFreeSubscriberRegistry; // Lock-free version
 pub const MatchResult = LockFreeSubscriberRegistry.MatchResult;

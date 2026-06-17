@@ -139,7 +139,7 @@ pub const EventRingBuffer = struct {
     pub fn isFull(self: *const Self) bool {
         const head = self.head.load(.acquire);
         const tail = self.tail.load(.acquire);
-        return (head - tail) >= self.capacity;
+        return (head -| tail) >= self.capacity;
     }
 };
 

@@ -25,25 +25,108 @@ const message_bus_mod = @import("../message_bus/mod.zig");
 const Event = @import("../event.zig").Event;
 const EventWorker = @import("../message_bus/event_worker.zig").EventWorker;
 
-fn writeJsonString(writer: anytype, value: []const u8) !void {
-    try writer.writeByte('"');
+fn appendByte(buffer: []u8, pos: *usize, byte: u8) !void {
+    if (pos.* >= buffer.len) return error.NoSpaceLeft;
+    buffer[pos.*] = byte;
+    pos.* += 1;
+}
+
+fn appendSlice(buffer: []u8, pos: *usize, bytes: []const u8) !void {
+    if (bytes.len > buffer.len -| pos.*) return error.NoSpaceLeft;
+    @memcpy(buffer[pos.* .. pos.* + bytes.len], bytes);
+    pos.* += bytes.len;
+}
+
+fn appendU64(buffer: []u8, pos: *usize, value: u64) !void {
+    if (value == 0) {
+        try appendByte(buffer, pos, '0');
+        return;
+    }
+
+    var digits: [20]u8 = undefined;
+    var index = digits.len;
+    var remaining = value;
+    while (remaining != 0) {
+        index -= 1;
+        digits[index] = '0' + @as(u8, @intCast(remaining % 10));
+        remaining /= 10;
+    }
+
+    try appendSlice(buffer, pos, digits[index..]);
+}
+
+fn appendI64(buffer: []u8, pos: *usize, value: i64) !void {
+    if (value < 0) {
+        try appendByte(buffer, pos, '-');
+        const magnitude = @as(u64, @intCast(-(value + 1))) + 1;
+        try appendU64(buffer, pos, magnitude);
+    } else {
+        try appendU64(buffer, pos, @intCast(value));
+    }
+}
+
+fn appendBool(buffer: []u8, pos: *usize, value: bool) !void {
+    try appendSlice(buffer, pos, if (value) "true" else "false");
+}
+
+fn appendF64(buffer: []u8, pos: *usize, value: f64) !void {
+    if (!std.math.isFinite(value)) {
+        try appendSlice(buffer, pos, "null");
+        return;
+    }
+
+    var remaining = value;
+    if (remaining < 0) {
+        try appendByte(buffer, pos, '-');
+        remaining = -remaining;
+    }
+
+    var whole: u64 = @intFromFloat(@floor(remaining));
+    const fraction = remaining - @as(f64, @floatFromInt(whole));
+    var scaled_fraction: u64 = @intFromFloat(@floor((fraction * 1_000_000.0) + 0.5));
+    if (scaled_fraction == 1_000_000) {
+        whole += 1;
+        scaled_fraction = 0;
+    }
+
+    try appendU64(buffer, pos, whole);
+    if (scaled_fraction == 0) return;
+
+    try appendByte(buffer, pos, '.');
+    var divisor: u64 = 100_000;
+    while (divisor > scaled_fraction and divisor > 1) : (divisor /= 10) {
+        try appendByte(buffer, pos, '0');
+    }
+
+    var trailing_trim = scaled_fraction;
+    while (trailing_trim % 10 == 0) {
+        trailing_trim /= 10;
+    }
+    try appendU64(buffer, pos, trailing_trim);
+}
+
+fn appendJsonString(buffer: []u8, pos: *usize, value: []const u8) !void {
+    try appendByte(buffer, pos, '"');
     for (value) |c| {
         switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
+            '"' => try appendSlice(buffer, pos, "\\\""),
+            '\\' => try appendSlice(buffer, pos, "\\\\"),
+            '\n' => try appendSlice(buffer, pos, "\\n"),
+            '\r' => try appendSlice(buffer, pos, "\\r"),
+            '\t' => try appendSlice(buffer, pos, "\\t"),
             else => {
                 if (c < 0x20) {
-                    try writer.print("\\u{x:0>4}", .{c});
+                    const hex = "0123456789abcdef";
+                    try appendSlice(buffer, pos, "\\u00");
+                    try appendByte(buffer, pos, hex[c >> 4]);
+                    try appendByte(buffer, pos, hex[c & 0x0f]);
                 } else {
-                    try writer.writeByte(c);
+                    try appendByte(buffer, pos, c);
                 }
             },
         }
     }
-    try writer.writeByte('"');
+    try appendByte(buffer, pos, '"');
 }
 
 /// Supported field types for reactive models.
@@ -72,6 +155,19 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
         const Self = @This();
         pub const model_name = table_name;
         pub const field_defs = fields;
+        const MAX_STRING_SNAPSHOT_BYTES = 4096;
+        threadlocal var string_snapshot: [MAX_STRING_SNAPSHOT_BYTES]u8 = undefined;
+        const JsonFieldPrefixes = blk: {
+            var prefixes: [field_count][]const u8 = undefined;
+            for (FieldsMeta, 0..) |field, i| {
+                prefixes[i] = if (i == 0)
+                    "{\"" ++ field.name ++ "\":"
+                else
+                    ",\"" ++ field.name ++ "\":";
+            }
+            break :blk prefixes;
+        };
+        const JsonVersionPrefix = ",\"version\":";
 
         // --- Instance state ---
 
@@ -135,6 +231,9 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
 
         /// Free string fields.
         pub fn deinit(self: *Self) void {
+            self.string_lock.lock();
+            defer self.string_lock.unlock();
+
             inline for (FieldsMeta) |field| {
                 if (@as(FieldType, @field(fields, field.name)) == .String) {
                     const str = @field(self.field_storage, field.name);
@@ -159,11 +258,15 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
                 .bool => @field(self.field_storage, name).load(.acquire),
                 .DateTime => @field(self.field_storage, name).load(.acquire),
                 .String => blk: {
-                    // String reads need the lock (non-atomic pointer)
+                    // Return a thread-local snapshot so writers can replace/free
+                    // the owned string after the lock is released.
                     const mutable_self: *Self = @constCast(self);
                     mutable_self.string_lock.lock();
                     defer mutable_self.string_lock.unlock();
-                    break :blk @field(self.field_storage, name);
+                    const str = @field(self.field_storage, name);
+                    const len = @min(str.len, string_snapshot.len);
+                    @memcpy(string_snapshot[0..len], str[0..len]);
+                    break :blk string_snapshot[0..len];
                 },
             };
         }
@@ -249,42 +352,39 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
         /// Serialize all fields to JSON into the provided buffer.
         /// Domain models may override this with a custom implementation.
         pub fn toJSON(self: *Self, buffer: []u8) ![]const u8 {
-            // Build JSON dynamically from field metadata
-            var stream = std.io.fixedBufferStream(buffer);
-            const writer = stream.writer();
-            try writer.writeByte('{');
-            var first = true;
-            inline for (FieldsMeta) |field| {
-                if (!first) try writer.writeByte(',');
-                first = false;
+            var pos: usize = 0;
+            inline for (FieldsMeta, 0..) |field, i| {
+                try appendSlice(buffer, &pos, JsonFieldPrefixes[i]);
                 const ft: FieldType = @field(fields, field.name);
-                try writer.print("\"{s}\":", .{field.name});
                 switch (ft) {
                     .String => {
-                        const val = self.get(field.name);
-                        try writeJsonString(writer, val);
+                        self.string_lock.lock();
+                        defer self.string_lock.unlock();
+                        const val = @field(self.field_storage, field.name);
+                        try appendJsonString(buffer, &pos, val);
                     },
                     .i64, .DateTime => {
-                        const val = self.get(field.name);
-                        try writer.print("{d}", .{val});
+                        const val = @field(self.field_storage, field.name).load(.acquire);
+                        try appendI64(buffer, &pos, val);
                     },
                     .u64 => {
-                        const val = self.get(field.name);
-                        try writer.print("{d}", .{val});
+                        const val = @field(self.field_storage, field.name).load(.acquire);
+                        try appendU64(buffer, &pos, val);
                     },
                     .f64 => {
-                        const val = self.get(field.name);
-                        try writer.print("{d}", .{val});
+                        const val = @as(f64, @bitCast(@field(self.field_storage, field.name).load(.acquire)));
+                        try appendF64(buffer, &pos, val);
                     },
                     .bool => {
-                        const val = self.get(field.name);
-                        try writer.print("{}", .{val});
+                        const val = @field(self.field_storage, field.name).load(.acquire);
+                        try appendBool(buffer, &pos, val);
                     },
                 }
             }
-            try writer.print(",\"version\":{d}", .{self.getVersion()});
-            try writer.writeByte('}');
-            return stream.getWritten();
+            try appendSlice(buffer, &pos, JsonVersionPrefix);
+            try appendU64(buffer, &pos, self.getVersion());
+            try appendByte(buffer, &pos, '}');
+            return buffer[0..pos];
         }
 
         // --- Comptime type helpers ---

@@ -35,29 +35,52 @@ pub const LockFreeSubscriberRegistry = struct {
     };
 
     pub const SubscriptionSlot = struct {
+        const State = enum(u8) {
+            empty = 0,
+            reserved = 1,
+            active = 2,
+            deleted = 3,
+        };
+
         subscription: Subscription,
-        active: std.atomic.Value(bool), // false = deleted
+        state: std.atomic.Value(u8),
         ever_used: bool, // true if subscription data has been written
 
         pub fn isActive(self: *const SubscriptionSlot) bool {
-            return self.active.load(.acquire);
+            return self.state.load(.acquire) == @intFromEnum(State.active);
         }
 
         pub fn deactivate(self: *SubscriptionSlot) void {
-            self.active.store(false, .release);
+            self.state.store(@intFromEnum(State.deleted), .release);
+        }
+
+        fn tryReserve(self: *SubscriptionSlot) bool {
+            return self.state.cmpxchgWeak(
+                @intFromEnum(State.empty),
+                @intFromEnum(State.reserved),
+                .acquire,
+                .monotonic,
+            ) == null;
+        }
+
+        fn activate(self: *SubscriptionSlot) void {
+            self.state.store(@intFromEnum(State.active), .release);
         }
     };
 
     pub fn init(allocator: Allocator) !Self {
         const initial_capacity = 64;
         const list = try allocator.create(SubscriptionList);
+        errdefer allocator.destroy(list);
 
         const items = try allocator.alloc(SubscriptionSlot, initial_capacity);
-        @memset(items, SubscriptionSlot{
-            .subscription = undefined,
-            .active = std.atomic.Value(bool).init(false),
-            .ever_used = false,
-        });
+        for (items) |*slot| {
+            slot.* = SubscriptionSlot{
+                .subscription = undefined,
+                .state = std.atomic.Value(u8).init(@intFromEnum(SubscriptionSlot.State.empty)),
+                .ever_used = false,
+            };
+        }
 
         list.* = SubscriptionList{
             .items = items,
@@ -113,31 +136,14 @@ pub const LockFreeSubscriberRegistry = struct {
 
         const list = self.subscriptions.load(.acquire);
 
-        const max_retries = 100;
-        var retries: usize = 0;
         for (list.items) |*slot| {
-            if (!slot.active.load(.acquire)) {
-                retries = 0;
-                while (retries < max_retries) : (retries += 1) {
-                    // Write data BEFORE making slot visible to readers
-                    slot.subscription = sub;
-
-                    // Memory fence: CAS with release ensures subscription data
-                    // is visible to readers who observe active=true with acquire
-                    const success = slot.active.cmpxchgWeak(
-                        false,
-                        true,
-                        .release,
-                        .acquire,
-                    ) == null;
-
-                    if (success) {
-                        slot.ever_used = true;
-                        _ = list.count.fetchAdd(1, .monotonic);
-                        std.log.info("Subscribed: id={d} topic={s}", .{ id, topic });
-                        return id;
-                    }
-                }
+            if (slot.tryReserve()) {
+                slot.subscription = sub;
+                slot.ever_used = true;
+                slot.activate();
+                _ = list.count.fetchAdd(1, .monotonic);
+                std.log.info("Subscribed: id={d} topic={s}", .{ id, topic });
+                return id;
             }
         }
 
@@ -164,14 +170,12 @@ pub const LockFreeSubscriberRegistry = struct {
         }
     }
 
-    pub fn getMatching(
+    pub fn getMatchingInto(
         self: *Self,
         event: *const Event,
-        allocator: Allocator,
-    ) ![]Subscription {
+        out: []Subscription,
+    ) usize {
         const list = self.subscriptions.load(.acquire);
-
-        var matching_buffer: [64]Subscription = undefined;
         var matching_count: usize = 0;
 
         for (list.items) |*slot| {
@@ -191,15 +195,28 @@ pub const LockFreeSubscriberRegistry = struct {
 
             std.log.debug("Subscriber {d}: MATCHED! (topic={s}, filter_conditions={d})", .{ sub.id, sub.topic, sub.filter.conditions.len });
 
-            if (matching_count >= matching_buffer.len) {
-                std.log.warn("Too many matching subscribers (max 64)", .{});
+            if (matching_count >= out.len) {
+                std.log.warn("Too many matching subscribers (max {d})", .{out.len});
                 break;
             }
 
-            matching_buffer[matching_count] = sub.*;
+            out[matching_count] = sub.*;
             matching_count += 1;
         }
 
+        return matching_count;
+    }
+
+    pub fn getMatching(
+        self: *Self,
+        event: *const Event,
+        allocator: Allocator,
+    ) ![]Subscription {
+        const list = self.subscriptions.load(.acquire);
+        const matching_buffer = try allocator.alloc(Subscription, list.capacity);
+        defer allocator.free(matching_buffer);
+
+        const matching_count = self.getMatchingInto(event, matching_buffer);
         const result = try allocator.alloc(Subscription, matching_count);
         @memcpy(result, matching_buffer[0..matching_count]);
         return result;

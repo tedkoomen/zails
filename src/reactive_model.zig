@@ -16,12 +16,31 @@
 ///   var trade = Trade.init(allocator);
 ///   trade.setPrice(15000);  // Lock-free update + publishes event
 ///   const price = trade.getPrice();  // Lock-free read
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const message_bus = @import("message_bus/mod.zig");
 const Event = @import("event.zig").Event;
-const generateEventId = @import("event.zig").generateEventId;
+
+fn writeJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try writer.print("\\u{x:0>4}", .{c});
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
+    try writer.writeByte('"');
+}
 
 /// Field type enum
 pub const FieldType = enum {
@@ -169,13 +188,21 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
         /// - get{FieldName}(): Lock-free read
         /// - set{FieldName}(value): Lock-free write + event publish
         /// - compareAndSwap{FieldName}(expected, new): CAS operation
+        pub fn getSymbol(self: *Self) []const u8 {
+            _ = self;
+            @compileError("getSymbol returned a borrowed slice after unlocking; use copySymbol(buffer) for thread-safe reads");
+        }
 
         // Symbol accessors (String)
         // Note: Must be non-const to lock mutex
-        pub fn getSymbol(self: *Self) []const u8 {
+        pub fn copySymbol(self: *Self, buffer: []u8) ![]const u8 {
             self.string_lock.lock();
             defer self.string_lock.unlock();
-            return @field(self.fields, "symbol");
+
+            const symbol = @field(self.fields, "symbol");
+            if (symbol.len > buffer.len) return error.BufferTooSmall;
+            @memcpy(buffer[0..symbol.len], symbol);
+            return buffer[0..symbol.len];
         }
 
         pub fn setSymbol(self: *Self, value: []const u8, bus: ?*message_bus.MessageBus) !void {
@@ -183,10 +210,9 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
             const new_str = try self.allocator.dupe(u8, value);
 
             self.string_lock.lock();
-            defer self.string_lock.unlock();
-
             const old = @field(self.fields, "symbol");
             @field(self.fields, "symbol") = new_str;
+            self.string_lock.unlock();
 
             // Free old value AFTER replacing (avoids use-after-free)
             if (old.len > 0) {
@@ -250,15 +276,14 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
                 var buffer: [4096]u8 = undefined;
                 const json = try self.toJSON(&buffer);
 
-                const event = Event{
-                    .id = generateEventId(),
-                    .timestamp = std.time.microTimestamp(),
-                    .event_type = .model_updated,
-                    .topic = table_name ++ ".updated",
-                    .model_type = table_name,
-                    .model_id = self.id,
-                    .data = json,
-                };
+                const event = try Event.initOwned(
+                    self.allocator,
+                    .model_updated,
+                    table_name ++ ".updated",
+                    table_name,
+                    self.id,
+                    json,
+                );
 
                 b.publish(event);
             }
@@ -266,15 +291,23 @@ pub fn ReactiveModel(comptime table_name: []const u8, comptime fields: anytype) 
 
         /// Serialize to JSON
         pub fn toJSON(self: *Self, buffer: []u8) ![]const u8 {
-            const symbol = self.getSymbol();
+            self.string_lock.lock();
+            defer self.string_lock.unlock();
+
+            const symbol = @field(self.fields, "symbol");
             const price = self.getPrice();
             const quantity = self.getQuantity();
 
-            return try std.fmt.bufPrint(
-                buffer,
-                "{{\"symbol\":\"{s}\",\"price\":{d},\"quantity\":{d},\"version\":{d}}}",
-                .{ symbol, price, quantity, self.getVersion() },
-            );
+            var fbs = std.io.fixedBufferStream(buffer);
+            const writer = fbs.writer();
+            try writer.writeAll("{\"symbol\":");
+            try writeJsonString(writer, symbol);
+            try writer.print(",\"price\":{d},\"quantity\":{d},\"version\":{d}}}", .{
+                price,
+                quantity,
+                self.getVersion(),
+            });
+            return fbs.getWritten();
         }
     };
 }
@@ -320,7 +353,8 @@ test "reactive model lock-free accessors" {
 
     // String update
     try trade.setSymbol("AAPL", null);
-    try std.testing.expectEqualStrings("AAPL", trade.getSymbol());
+    var symbol_buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("AAPL", try trade.copySymbol(&symbol_buffer));
 
     // Version increments
     try std.testing.expect(trade.getVersion() > 1);
@@ -407,13 +441,14 @@ test "reactive model setSymbol multiple updates" {
 
     // Multiple symbol updates should not leak memory
     try trade.setSymbol("AAPL", null);
-    try std.testing.expectEqualStrings("AAPL", trade.getSymbol());
+    var symbol_buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("AAPL", try trade.copySymbol(&symbol_buffer));
 
     try trade.setSymbol("GOOG", null);
-    try std.testing.expectEqualStrings("GOOG", trade.getSymbol());
+    try std.testing.expectEqualStrings("GOOG", try trade.copySymbol(&symbol_buffer));
 
     try trade.setSymbol("MSFT", null);
-    try std.testing.expectEqualStrings("MSFT", trade.getSymbol());
+    try std.testing.expectEqualStrings("MSFT", try trade.copySymbol(&symbol_buffer));
 
     // Version should have incremented for each update
     try std.testing.expect(trade.getVersion() >= 4); // 1 initial + 3 updates

@@ -8,6 +8,8 @@ pub const Config = struct {
     buffer_size: usize,
     pool_size: usize,
     max_connections: usize,
+    config_path: ?[]const u8,
+    ports_from_cli: bool,
 
     pub fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
         var ports = std.ArrayList(u16){};
@@ -18,6 +20,8 @@ pub const Config = struct {
         var buffer_size: usize = 4096;
         var pool_size: usize = 1024;
         var max_connections: usize = 10000;
+        var config_path: ?[]const u8 = null;
+        var ports_from_cli = false;
 
         var i: usize = 1; // Skip program name
         while (i < args.len) : (i += 1) {
@@ -33,10 +37,15 @@ pub const Config = struct {
                     const port = try std.fmt.parseInt(u16, port_str, 10);
                     try ports.append(allocator, port);
                 }
+                ports_from_cli = true;
             } else if (std.mem.eql(u8, arg, "--workers") or std.mem.eql(u8, arg, "-w")) {
                 i += 1;
                 if (i >= args.len) return error.MissingWorkersValue;
                 worker_threads = try std.fmt.parseInt(usize, args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--config") or std.mem.eql(u8, arg, "-c")) {
+                i += 1;
+                if (i >= args.len) return error.MissingConfigValue;
+                config_path = args[i];
             } else if (std.mem.eql(u8, arg, "--numa")) {
                 enable_numa = true;
             } else if (std.mem.eql(u8, arg, "--no-numa")) {
@@ -64,9 +73,7 @@ pub const Config = struct {
         }
 
         if (ports.items.len == 0) {
-            std.log.err("No ports specified. Use --ports or -p", .{});
-            printUsage();
-            return error.NoPortsSpecified;
+            try ports.append(allocator, 8080);
         }
 
         const ports_slice = try ports.toOwnedSlice(allocator);
@@ -78,6 +85,8 @@ pub const Config = struct {
             .buffer_size = buffer_size,
             .pool_size = pool_size,
             .max_connections = max_connections,
+            .config_path = config_path,
+            .ports_from_cli = ports_from_cli,
         };
     }
 
@@ -116,7 +125,7 @@ pub const Config = struct {
             \\Usage: zig_server [OPTIONS]
             \\
             \\Options:
-            \\  -p, --ports <ports>           Comma-separated list of ports (required)
+            \\  -p, --ports <ports>           Comma-separated list of ports (default: 8080)
             \\                                Example: --ports 8080,8081,8082
             \\  -w, --workers <count>         Number of worker threads (default: auto)
             \\  --numa                        Enable NUMA awareness (default)
@@ -124,10 +133,12 @@ pub const Config = struct {
             \\  --buffer-size <bytes>         Buffer size (default: 4096)
             \\  --pool-size <count>           Object pool size per worker (default: 1024)
             \\  --max-connections <count>     Maximum concurrent connections (default: 10000)
+            \\  -c, --config <path>           Load JSON/YAML Zails config file
             \\  -h, --help                    Show this help message
             \\
             \\Examples:
             \\  zig_server --ports 8080,8081,8082 --workers 16 --numa
+            \\  zig_server --config config/zails.json
             \\  zig_server -p 8080 -w 4 --pool-size 2048 --max-connections 50000
             \\
         , .{});

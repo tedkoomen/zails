@@ -6,7 +6,6 @@
 /// 3. Subscribing to model events
 /// 4. Processing requests that publish events
 /// 5. Handlers reacting to events in real-time
-
 const std = @import("std");
 const message_bus = @import("../src/message_bus/mod.zig");
 const ReactiveModelWithHandlers = @import("../src/model_handler_integration.zig").ReactiveModelWithHandlers;
@@ -228,7 +227,8 @@ pub fn main() !void {
     std.log.info("  Total volume:       ${d}", .{handler_context.total_volume.load(.acquire)});
 
     std.log.info("\nTrade Model:", .{});
-    std.log.info("  Symbol:    {s}", .{trade.base.getSymbol()});
+    var final_symbol_buffer: [64]u8 = undefined;
+    std.log.info("  Symbol:    {s}", .{try trade.base.copySymbol(&final_symbol_buffer)});
     std.log.info("  Price:     ${d}", .{trade.base.getPrice()});
     std.log.info("  Quantity:  {d}", .{trade.base.getQuantity()});
     std.log.info("  Version:   {d}", .{trade.base.getVersion()});

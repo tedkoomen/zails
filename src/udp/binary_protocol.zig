@@ -12,7 +12,6 @@
 ///   });
 ///
 ///   const result = AddOrder.parse(datagram);
-
 const std = @import("std");
 
 /// Field types supported in binary protocol definitions
@@ -68,6 +67,27 @@ fn fieldByteSize(comptime def: BinaryFieldDef) usize {
         .u64, .i64, .f64 => 8,
         .ascii, .raw_bytes => def.size,
     };
+}
+
+fn writeJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try writer.print("\\u{x:0>4}", .{c});
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
+    try writer.writeByte('"');
 }
 
 /// Maps a BinaryFieldType to the corresponding Zig type
@@ -229,9 +249,7 @@ pub fn BinaryProtocol(comptime name: []const u8, comptime fields: anytype) type 
                     .ascii => {
                         // Trim trailing spaces/nulls for ASCII fields
                         const trimmed = std.mem.trimRight(u8, &value, &[_]u8{ 0, ' ' });
-                        try writer.writeByte('"');
-                        try writer.writeAll(trimmed);
-                        try writer.writeByte('"');
+                        try writeJsonString(writer, trimmed);
                     },
                     .raw_bytes => {
                         // Output as hex string
@@ -318,6 +336,20 @@ test "BinaryProtocol ASCII fields" {
     const result = TestMsg.parse(&data);
     try std.testing.expect(result.isOk());
     try std.testing.expectEqualStrings("AAPL    ", &result.msg.symbol);
+}
+
+test "BinaryProtocol JSON escapes ASCII fields" {
+    const TestMsg = BinaryProtocol("TestMsg", .{
+        .symbol = .{ .type = .ascii, .offset = 0, .size = 4 },
+    });
+
+    const data = [_]u8{ 'A', '"', 'B', ' ' };
+    const result = TestMsg.parse(&data);
+    try std.testing.expect(result.isOk());
+
+    var buffer: [128]u8 = undefined;
+    const json = try TestMsg.toJSON(&result.msg, &buffer);
+    try std.testing.expectEqualStrings("{\"symbol\":\"A\\\"B\"}", json);
 }
 
 test "BinaryProtocol signed integer fields" {

@@ -3,13 +3,33 @@
 ///
 /// This handler demonstrates basic request/response processing.
 /// For message bus integration examples, see docs/message_bus/usage_example.zig
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const result = @import("result");
 
 /// Message type ID for example handler
 pub const MESSAGE_TYPE: u8 = 20;
+
+fn writeJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try writer.print("\\u{x:0>4}", .{c});
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
+    try writer.writeByte('"');
+}
 
 /// Handler context
 pub const Context = struct {
@@ -87,16 +107,19 @@ pub fn handle(
         return result.HandlerResponse.err(.malformed_message);
     }
 
-    // Build response
-    const response = std.fmt.bufPrint(
-        response_buffer,
-        "{{\"status\":\"success\",\"name\":\"{s}\",\"count\":{d}}}",
-        .{ name_val.string, count_val },
-    ) catch {
+    var stream = std.io.fixedBufferStream(response_buffer);
+    const writer = stream.writer();
+    writer.writeAll("{\"status\":\"success\",\"name\":") catch {
+        return result.HandlerResponse.err(.message_too_large);
+    };
+    writeJsonString(writer, name_val.string) catch {
+        return result.HandlerResponse.err(.message_too_large);
+    };
+    writer.print(",\"count\":{d}}}", .{count_val}) catch {
         return result.HandlerResponse.err(.message_too_large);
     };
 
-    return result.HandlerResponse.ok(response);
+    return result.HandlerResponse.ok(stream.getWritten());
 }
 
 // ============================================================================
@@ -132,4 +155,20 @@ test "example handler rejects invalid request" {
     const response = handle(&context, request, &response_buffer, allocator);
 
     try std.testing.expect(response.isErr());
+}
+
+test "example handler escapes JSON response strings" {
+    const allocator = std.testing.allocator;
+
+    var context = Context.init();
+    defer context.deinit();
+    context.allocator = allocator;
+
+    const request = "{\"name\":\"a\\\"b\\n\",\"count\":1}";
+    var response_buffer: [4096]u8 = undefined;
+
+    const response = handle(&context, request, &response_buffer, allocator);
+
+    try std.testing.expect(response.isOk());
+    try std.testing.expect(std.mem.indexOf(u8, response.data, "\"name\":\"a\\\"b\\n\"") != null);
 }

@@ -202,6 +202,7 @@ pub const Event = struct {
             const tag_result = try proto.decodeVarint(pb_data[pos..]);
             pos += tag_result.bytes_read;
 
+            if ((tag_result.value >> 3) > std.math.maxInt(u32)) return error.InvalidFieldNumber;
             const field_number = @as(u32, @intCast(tag_result.value >> 3));
             const wire_type = @as(u3, @intCast(tag_result.value & 0x7));
 
@@ -232,7 +233,10 @@ pub const Event = struct {
                     if (wire_type != @intFromEnum(proto.WireType.varint)) return error.InvalidWireType;
                     const val_result = try proto.decodeVarint(pb_data[pos..]);
                     pos += val_result.bytes_read;
-                    event.event_type = @enumFromInt(@as(u8, @intCast(val_result.value)));
+                    if (val_result.value > std.math.maxInt(u8)) return error.InvalidEventType;
+                    event.event_type = std.meta.intToEnum(EventType, @as(u8, @intCast(val_result.value))) catch {
+                        return error.InvalidEventType;
+                    };
                 },
                 4 => { // topic (string)
                     if (wire_type != @intFromEnum(proto.WireType.length_delimited)) return error.InvalidWireType;
@@ -316,6 +320,13 @@ pub const Event = struct {
         if (self.data.len > 0) allocator.free(self.data);
     }
 };
+
+test "event deserialize rejects invalid event type" {
+    const allocator = std.testing.allocator;
+    const bad = [_]u8{ 24, 3 }; // field 3 (event_type), value 3 is not declared
+
+    try std.testing.expectError(error.InvalidEventType, Event.deserialize(&bad, allocator));
+}
 
 /// Generate unique event ID using random UUID (v4)
 pub fn generateEventId() u128 {

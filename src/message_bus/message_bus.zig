@@ -20,6 +20,7 @@ pub const MessageBus = struct {
     total_published: std.atomic.Value(u64),
     total_dropped: std.atomic.Value(u64),
     total_delivered: std.atomic.Value(u64),
+    total_backpressure: std.atomic.Value(u64),
     config: Config,
     allocator: Allocator,
 
@@ -28,6 +29,18 @@ pub const MessageBus = struct {
         worker_count: usize = 4,
         batch_size: usize = 64,
         flush_interval_ms: u64 = 100,
+        overflow_policy: OverflowPolicy = .drop_newest,
+        spin_before_yield: usize = 256,
+        yields_before_sleep: usize = 32,
+        backpressure_sleep_ns: u64 = 50_000,
+        drop_log_interval: u64 = 10_000,
+    };
+
+    pub const OverflowPolicy = enum {
+        /// Preserve ultra-low publish latency by dropping the new event if the queue is full.
+        drop_newest,
+        /// Preserve events by applying producer backpressure until a queue slot opens.
+        backpressure,
     };
 
     pub fn init(allocator: Allocator, config: Config) !Self {
@@ -41,6 +54,7 @@ pub const MessageBus = struct {
             .total_published = std.atomic.Value(u64).init(0),
             .total_dropped = std.atomic.Value(u64).init(0),
             .total_delivered = std.atomic.Value(u64).init(0),
+            .total_backpressure = std.atomic.Value(u64).init(0),
             .config = config,
             .allocator = allocator,
         };
@@ -96,13 +110,50 @@ pub const MessageBus = struct {
     pub fn publish(self: *Self, event: Event) void {
         if (self.event_queue.push(event)) {
             _ = self.total_published.fetchAdd(1, .monotonic);
-        } else {
-            // Free owned event data to prevent memory leak
-            event.deinit(self.allocator);
-            const dropped = self.total_dropped.fetchAdd(1, .monotonic);
-            if (dropped % 1000 == 0) {
-                std.log.warn("Event queue full - dropped {} total events", .{dropped + 1});
+            return;
+        }
+
+        switch (self.config.overflow_policy) {
+            .drop_newest => self.dropEvent(event),
+            .backpressure => self.publishWithBackpressure(event),
+        }
+    }
+
+    fn publishWithBackpressure(self: *Self, event: Event) void {
+        _ = self.total_backpressure.fetchAdd(1, .monotonic);
+
+        var spins: usize = 0;
+        var yields: usize = 0;
+        while (!self.shutdown.load(.acquire)) {
+            if (self.event_queue.push(event)) {
+                _ = self.total_published.fetchAdd(1, .monotonic);
+                return;
             }
+
+            if (spins < self.config.spin_before_yield) {
+                spins += 1;
+                std.atomic.spinLoopHint();
+                continue;
+            }
+
+            if (yields < self.config.yields_before_sleep) {
+                yields += 1;
+                std.Thread.yield() catch {};
+                continue;
+            }
+
+            std.Thread.sleep(self.config.backpressure_sleep_ns);
+        }
+
+        self.dropEvent(event);
+    }
+
+    fn dropEvent(self: *Self, event: Event) void {
+        // Free owned event data to prevent memory leak
+        event.deinit(self.allocator);
+        const dropped = self.total_dropped.fetchAdd(1, .monotonic) + 1;
+        if (dropped == 1 or dropped % self.config.drop_log_interval == 0) {
+            std.log.warn("Event queue full - dropped {} total events", .{dropped});
         }
     }
 
@@ -124,6 +175,7 @@ pub const MessageBus = struct {
             .published = self.total_published.load(.acquire),
             .dropped = self.total_dropped.load(.acquire),
             .delivered = self.total_delivered.load(.acquire),
+            .backpressure = self.total_backpressure.load(.acquire),
             .queued = self.event_queue.size(),
         };
     }
@@ -132,6 +184,7 @@ pub const MessageBus = struct {
         published: u64,
         dropped: u64,
         delivered: u64,
+        backpressure: u64,
         queued: usize,
     };
 };
@@ -191,6 +244,7 @@ test "message bus queue overflow" {
     var bus = try MessageBus.init(allocator, .{
         .queue_capacity = 4, // Very small queue
         .worker_count = 1,
+        .overflow_policy = .drop_newest,
     });
     defer bus.deinit();
 

@@ -32,7 +32,7 @@ pub const EventWorker = struct {
         const message_bus_cpu_start = @min(2, total_cpus / 2);
         self.cpu_id = message_bus_cpu_start + (self.id % (total_cpus - message_bus_cpu_start));
 
-        std.log.info("EventWorker {}: would pin to CPU {} (affinity disabled)", .{self.id, self.cpu_id.?});
+        std.log.info("EventWorker {}: would pin to CPU {} (affinity disabled)", .{ self.id, self.cpu_id.? });
     }
 
     pub fn run(self: *Self) void {
@@ -41,24 +41,24 @@ pub const EventWorker = struct {
         // Set CPU affinity to isolate from TCP workers
         self.setCpuAffinity();
 
-        std.log.info("EventWorker {} started on CPU {?}", .{self.id, self.cpu_id});
+        std.log.info("EventWorker {} started on CPU {?}", .{ self.id, self.cpu_id });
+
+        const configured_sleep_ns = self.config.flush_interval_ms * std.time.ns_per_ms;
+        const idle_sleep_ns = @min(configured_sleep_ns, 100_000); // 100us cap for low delivery latency
 
         while (!self.message_bus.shutdown.load(.acquire)) {
             // Pop event from queue
             const event = self.message_bus.event_queue.pop() orelse {
                 // Queue empty - sleep briefly
-                std.Thread.sleep(self.config.flush_interval_ms * std.time.ns_per_ms);
+                std.Thread.sleep(idle_sleep_ns);
                 continue;
             };
 
-            const subscribers = self.message_bus.subscribers.getMatching(&event, allocator) catch |err| {
-                std.log.err("Worker {}: Failed to get subscribers: {}", .{ self.id, err });
-                event.deinit(allocator);
-                continue;
-            };
-            defer allocator.free(subscribers);
+            var subscriber_buffer: [64]Subscription = undefined;
+            const subscriber_count = self.message_bus.subscribers.getMatchingInto(&event, &subscriber_buffer);
+            const subscribers = subscriber_buffer[0..subscriber_count];
 
-            self.deliverParallel(&event, subscribers, allocator);
+            self.deliverSequential(&event, subscribers, allocator);
 
             std.log.debug("Worker {}: Event delivered - topic={s} subscribers={d}", .{
                 self.id,
@@ -72,25 +72,7 @@ pub const EventWorker = struct {
         std.log.info("EventWorker {} stopped", .{self.id});
     }
 
-    const HandlerContext = struct {
-        worker_id: usize,
-        event: *const Event,
-        subscription: *const Subscription,
-        allocator: Allocator,
-        message_bus: *MessageBus,
-    };
-
-    fn handlerThreadFn(context: HandlerContext) void {
-        context.subscription.handler(context.event, context.allocator);
-        _ = context.message_bus.total_delivered.fetchAdd(1, .monotonic);
-
-        std.log.debug("Worker {}: Delivered to subscription {d} [parallel]", .{
-            context.worker_id,
-            context.subscription.id,
-        });
-    }
-
-    fn deliverParallel(
+    fn deliverSequential(
         self: *Self,
         event: *const Event,
         subscribers: []const Subscription,
@@ -98,43 +80,13 @@ pub const EventWorker = struct {
     ) void {
         if (subscribers.len == 0) return;
 
-        if (subscribers.len == 1) {
-            subscribers[0].handler(event, allocator);
+        for (subscribers) |sub| {
+            sub.handler(event, allocator);
             _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
-            return;
-        }
-
-        const threads = allocator.alloc(std.Thread, subscribers.len) catch {
-            std.log.err("Worker {}: Failed to allocate threads, falling back to sequential", .{self.id});
-            for (subscribers) |sub| {
-                sub.handler(event, allocator);
-                _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
-            }
-            return;
-        };
-        defer allocator.free(threads);
-
-        var spawned_count: usize = 0;
-        for (subscribers) |*sub| {
-            const context = HandlerContext{
-                .worker_id = self.id,
-                .event = event,
-                .subscription = sub,
-                .allocator = allocator,
-                .message_bus = self.message_bus,
-            };
-
-            threads[spawned_count] = std.Thread.spawn(.{}, handlerThreadFn, .{context}) catch {
-                std.log.err("Worker {}: Failed to spawn handler thread, executing inline", .{self.id});
-                sub.handler(event, allocator);
-                _ = self.message_bus.total_delivered.fetchAdd(1, .monotonic);
-                continue;
-            };
-            spawned_count += 1;
-        }
-
-        for (threads[0..spawned_count]) |thread| {
-            thread.join();
+            std.log.debug("Worker {}: Delivered to subscription {d}", .{
+                self.id,
+                sub.id,
+            });
         }
     }
 };

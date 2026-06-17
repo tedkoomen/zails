@@ -72,39 +72,83 @@ pub fn build(b: *std.Build) void {
     client_run_step.dependOn(&client_run_cmd.step);
 
     // Tests
-    const test_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    // Add same imports as root module
-    test_module.addImport("handlers", handlers_module);
-    test_module.addImport("result", result_module);
-
-    const unit_tests = b.addTest(.{
-        .name = "tests",
-        .root_module = test_module,
-    });
-
-    const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
-
-    // Message bus module tests (standalone)
-    const message_bus_test_module = b.createModule(.{
-        .root_source_file = b.path("src/test_message_bus.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const message_bus_tests = b.addTest(.{
-        .name = "message_bus_tests",
-        .root_module = message_bus_test_module,
-    });
-
-    const run_message_bus_tests = b.addRunArtifact(message_bus_tests);
     const message_bus_test_step = b.step("test-message-bus", "Run message bus module tests (including event_builder)");
-    message_bus_test_step.dependOn(&run_message_bus_tests.step);
+
+    if (target.result.os.tag == .linux) {
+        const test_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        // Add same imports as root module
+        test_module.addImport("handlers", handlers_module);
+        test_module.addImport("result", result_module);
+
+        const unit_tests = b.addTest(.{
+            .name = "tests",
+            .root_module = test_module,
+        });
+
+        const run_unit_tests = b.addRunArtifact(unit_tests);
+        test_step.dependOn(&run_unit_tests.step);
+
+        const extra_test_files = [_]struct {
+            name: []const u8,
+            path: []const u8,
+            needs_result: bool = false,
+        }{
+            .{ .name = "config_tests", .path = "src/config.zig" },
+            .{ .name = "config_system_tests", .path = "src/config_system.zig" },
+            .{ .name = "proto_tests", .path = "src/proto.zig" },
+            .{ .name = "event_tests", .path = "src/event.zig" },
+            .{ .name = "local_ipc_tests", .path = "src/local_ipc.zig" },
+            .{ .name = "query_builder_tests", .path = "src/orm/query_builder.zig" },
+            .{ .name = "model_tests", .path = "src/orm/model.zig" },
+            .{ .name = "field_types_tests", .path = "src/orm/field_types.zig" },
+            .{ .name = "binary_protocol_tests", .path = "src/udp/binary_protocol.zig" },
+            .{ .name = "sequence_tracker_tests", .path = "src/udp/sequence_tracker.zig" },
+            .{ .name = "ring_buffer_tests", .path = "src/test_ring_buffer.zig" },
+            .{ .name = "subscriber_registry_tests", .path = "src/test_lockfree_subscriber_registry.zig" },
+            .{ .name = "reactive_model_tests", .path = "src/reactive_model.zig" },
+            .{ .name = "example_handler_tests", .path = "handlers/example_handler.zig", .needs_result = true },
+            .{ .name = "metrics_handler_tests", .path = "handlers/metrics_handler.zig", .needs_result = true },
+            .{ .name = "subscription_handler_tests", .path = "handlers/subscription_handler.zig", .needs_result = true },
+        };
+
+        for (extra_test_files) |test_file| {
+            const extra_module = b.createModule(.{
+                .root_source_file = b.path(test_file.path),
+                .target = target,
+                .optimize = optimize,
+            });
+            if (test_file.needs_result) {
+                extra_module.addImport("result", result_module);
+            }
+
+            const extra_tests = b.addTest(.{
+                .name = test_file.name,
+                .root_module = extra_module,
+            });
+            const run_extra_tests = b.addRunArtifact(extra_tests);
+            test_step.dependOn(&run_extra_tests.step);
+        }
+
+        // Message bus module tests (standalone)
+        const message_bus_test_module = b.createModule(.{
+            .root_source_file = b.path("src/test_message_bus.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        const message_bus_tests = b.addTest(.{
+            .name = "message_bus_tests",
+            .root_module = message_bus_test_module,
+        });
+
+        const run_message_bus_tests = b.addRunArtifact(message_bus_tests);
+        message_bus_test_step.dependOn(&run_message_bus_tests.step);
+    }
 
     // Zails CLI tool
     const zails_module = b.createModule(.{

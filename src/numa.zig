@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -196,6 +197,10 @@ fn parseRangeList(allocator: Allocator, input: []const u8) ![]u32 {
 
 // CPU affinity functions
 pub fn pinThreadToCpu(cpu_id: u32) !void {
+    if (comptime builtin.os.tag != .linux) {
+        return;
+    }
+
     var cpuset: posix.cpu_set_t = undefined;
     cpuSetZero(&cpuset);
     cpuSetAdd(&cpuset, cpu_id);

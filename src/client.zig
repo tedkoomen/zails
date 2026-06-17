@@ -1,8 +1,8 @@
 /// Generic test client for Zails
 /// Supports sending different message types to test handlers
-
 const std = @import("std");
 const net = std.net;
+const local_ipc = @import("local_ipc.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -27,14 +27,6 @@ pub fn main() !void {
 
     const data = if (args.len > 3) args[3] else "Hello, Zails!";
 
-    std.log.info("Connecting to localhost:{}...", .{port});
-
-    const address = try net.Address.parseIp("127.0.0.1", port);
-    const stream = try net.tcpConnectToAddress(address);
-    defer stream.close();
-
-    std.log.info("Connected! Sending message type {}", .{msg_type});
-
     // Prepare request based on message type
     var request_data: [4096]u8 = undefined;
     var request_len: usize = 0;
@@ -54,6 +46,32 @@ pub fn main() !void {
             return error.UnknownMessageType;
         },
     }
+
+    var ipc_response_buffer: [local_ipc.SLOT_PAYLOAD_BYTES]u8 = undefined;
+    var ipc_stats = local_ipc.ClientStats{};
+    if (try local_ipc.tryRequest(
+        allocator,
+        "127.0.0.1",
+        port,
+        msg_type,
+        request_data[0..request_len],
+        &ipc_response_buffer,
+        local_ipc.DEFAULT_TIMEOUT_US,
+        &ipc_stats,
+    )) |ipc_response| {
+        std.log.info("Used local IPC transport for localhost:{}", .{port});
+        printResponse(msg_type, msg_type, ipc_response);
+        return;
+    }
+
+    std.log.info("Local IPC unavailable ({s}); using TCP", .{ipc_stats.fallback_reason});
+    std.log.info("Connecting to localhost:{}...", .{port});
+
+    const address = try net.Address.parseIp("127.0.0.1", port);
+    const stream = try net.tcpConnectToAddress(address);
+    defer stream.close();
+
+    std.log.info("Connected! Sending message type {}", .{msg_type});
 
     // Send request: [1 byte: type][4 bytes: length][N bytes: data]
     var header: [5]u8 = undefined;
@@ -77,15 +95,19 @@ pub fn main() !void {
     const data_read = try stream.read(response_data[0..response_len]);
     if (data_read < response_len) return error.IncompleteResponse;
 
-    std.log.info("Received response (type {}): {} bytes", .{ response_type, response_len });
+    printResponse(msg_type, response_type, response_data[0..response_len]);
+}
+
+fn printResponse(msg_type: u8, response_type: u8, response_data: []const u8) void {
+    std.log.info("Received response (type {}): {} bytes", .{ response_type, response_data.len });
 
     // Parse response based on type
     switch (msg_type) {
         1 => { // Echo
-            std.log.info("  Echo: {s}", .{response_data[0..response_len]});
+            std.log.info("  Echo: {s}", .{response_data});
         },
         2 => { // Ping/Pong
-            if (response_len >= 24) {
+            if (response_data.len >= 24) {
                 const req_ts = std.mem.readInt(i64, response_data[0..8], .big);
                 const srv_ts = std.mem.readInt(i64, response_data[8..16], .big);
                 const uptime = std.mem.readInt(i64, response_data[16..24], .big);

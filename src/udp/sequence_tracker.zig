@@ -4,7 +4,6 @@
 /// for ensuring no market data messages are missed.
 ///
 /// Lock-free: uses atomic operations only (no mutexes).
-
 const std = @import("std");
 
 pub const SequenceTracker = struct {
@@ -33,22 +32,24 @@ pub const SequenceTracker = struct {
     pub fn check(self: *SequenceTracker, seq: u64) SeqStatus {
         _ = self.total_checked.fetchAdd(1, .monotonic);
 
-        const expected = self.expected_seq.load(.acquire);
+        while (true) {
+            const expected = self.expected_seq.load(.acquire);
 
-        if (seq == expected) {
-            // Happy path: in order
-            self.expected_seq.store(expected + 1, .release);
-            return .ok;
-        } else if (seq > expected) {
-            // Gap detected: missed messages between expected and seq
-            _ = self.gaps_detected.fetchAdd(1, .monotonic);
-            // Advance past the gap
-            self.expected_seq.store(seq + 1, .release);
-            return .{ .gap = .{ .expected = expected, .received = seq } };
-        } else {
-            // seq < expected: duplicate or out-of-order
-            _ = self.duplicates.fetchAdd(1, .monotonic);
-            return .duplicate;
+            if (seq == expected) {
+                if (self.expected_seq.cmpxchgWeak(expected, expected +% 1, .acq_rel, .acquire)) |_| {
+                    continue;
+                }
+                return .ok;
+            } else if (seq > expected) {
+                if (self.expected_seq.cmpxchgWeak(expected, seq +% 1, .acq_rel, .acquire)) |_| {
+                    continue;
+                }
+                _ = self.gaps_detected.fetchAdd(1, .monotonic);
+                return .{ .gap = .{ .expected = expected, .received = seq } };
+            } else {
+                _ = self.duplicates.fetchAdd(1, .monotonic);
+                return .duplicate;
+            }
         }
     }
 

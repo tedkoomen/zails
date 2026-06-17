@@ -1,11 +1,14 @@
 /// Event-driven worker using epoll for multiplexing thousands of connections
 /// Each worker manages its own epoll instance and connection state
-
 const std = @import("std");
 const net = std.net;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const server_framework = @import("server_framework.zig");
+const root = @import("root");
+const globals = if (@hasDecl(root, "globals")) root.globals else struct {
+    pub var global_metrics: ?*@import("metrics.zig").MetricsRegistry = null;
+};
 
 pub const ConnectionState = enum {
     reading_header,
@@ -29,7 +32,7 @@ pub const Connection = struct {
 
     // Buffers
     read_buffer: [8192]u8,
-    write_buffer: [8192]u8,
+    write_buffer: [8192 + 5]u8,
     write_pos: usize,
     write_len: usize,
 
@@ -74,7 +77,7 @@ pub const EpollWorker = struct {
     requests_processed: std.atomic.Value(u64),
     active_connections: ?*std.atomic.Value(usize),
 
-    const MAX_EVENTS = 256;  // Optimal batch size for cache efficiency
+    const MAX_EVENTS = 256; // Optimal batch size for cache efficiency
     const CONNECTION_TIMEOUT_MS = 30_000;
     const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
@@ -233,70 +236,92 @@ pub const EpollWorker = struct {
                 },
 
                 .processing => {
-                    // Process the message
+                    const request_start_ns = std.time.nanoTimestamp();
                     const request_data = if (conn.large_buffer) |buf|
                         buf[0..conn.message_length]
                     else
                         conn.read_buffer[0..conn.message_length];
 
+                    const response_buffer = conn.write_buffer[5..];
                     const response = self.handler_dispatch_fn(
                         self.handler_registry_ptr,
                         conn.fd,
                         conn.msg_type,
                         request_data,
-                        &conn.write_buffer,
+                        response_buffer,
                     ) orelse {
+                        if (globals.global_metrics) |metrics| {
+                            metrics.recordError(conn.msg_type);
+                        }
                         return error.HandlerFailed;
                     };
 
-                    // Prepare response header
-                    var header: [5]u8 = undefined;
-                    header[0] = conn.msg_type;
-                    std.mem.writeInt(u32, header[1..5], @as(u32, @intCast(response.len)), .big);
-
-                    // Enable TCP_CORK to batch writes (disable Nagle temporarily)
-                    const cork_on: c_int = 1;
-                    _ = std.posix.setsockopt(
-                        conn.fd,
-                        std.posix.IPPROTO.TCP,
-                        linux.TCP.CORK,
-                        &std.mem.toBytes(cork_on),
-                    ) catch {};
-
-                    // Use writev to combine header + response in single syscall
-                    var iov = [_]std.posix.iovec_const{
-                        .{ .base = &header, .len = 5 },
-                        .{ .base = response.ptr, .len = response.len },
-                    };
-                    _ = try std.posix.writev(conn.fd, &iov);
-
-                    // Disable TCP_CORK to flush immediately
-                    const cork_off: c_int = 0;
-                    _ = std.posix.setsockopt(
-                        conn.fd,
-                        std.posix.IPPROTO.TCP,
-                        linux.TCP.CORK,
-                        &std.mem.toBytes(cork_off),
-                    ) catch {};
-
-                    _ = self.requests_processed.fetchAdd(1, .monotonic);
-
-                    // Reset for next message
-                    conn.state = .reading_header;
-                    conn.header_pos = 0;
-                    conn.body_pos = 0;
-                    if (conn.large_buffer) |buf| {
-                        self.allocator.free(buf);
-                        conn.large_buffer = null;
+                    const elapsed_ns = std.time.nanoTimestamp() - request_start_ns;
+                    const latency_us: u64 = if (elapsed_ns > 0) @intCast(@divTrunc(elapsed_ns, 1000)) else 0;
+                    if (globals.global_metrics) |metrics| {
+                        metrics.recordRequest(conn.msg_type, latency_us);
                     }
 
-                    // Continue processing if more data available
+                    if (response.len + 5 > conn.write_buffer.len) return error.ResponseTooLarge;
+
+                    conn.write_buffer[0] = conn.msg_type;
+                    std.mem.writeInt(u32, conn.write_buffer[1..5], @as(u32, @intCast(response.len)), .big);
+                    conn.write_pos = 0;
+                    conn.write_len = response.len + 5;
+                    conn.state = .writing_response;
+
+                    try self.flushWrite(conn);
+                    if (conn.state == .writing_response) return;
+
                     continue;
                 },
 
-                .writing_response, .closing => unreachable,
+                .writing_response => {
+                    try self.flushWrite(conn);
+                    if (conn.state == .writing_response) return;
+
+                    continue;
+                },
+
+                .closing => return error.ConnectionClosed,
             }
         }
+    }
+
+    fn modifyInterest(self: *EpollWorker, fd: std.posix.fd_t, events: u32) !void {
+        var event = linux.epoll_event{
+            .events = events,
+            .data = .{ .fd = fd },
+        };
+        try std.posix.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_MOD, fd, &event);
+    }
+
+    fn flushWrite(self: *EpollWorker, conn: *Connection) !void {
+        while (conn.write_pos < conn.write_len) {
+            const n = std.posix.write(conn.fd, conn.write_buffer[conn.write_pos..conn.write_len]) catch |err| {
+                if (err == error.WouldBlock) {
+                    try self.modifyInterest(conn.fd, linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.ET | linux.EPOLL.RDHUP);
+                    return;
+                }
+                return err;
+            };
+            if (n == 0) return error.ConnectionClosed;
+            conn.write_pos += n;
+        }
+
+        _ = self.requests_processed.fetchAdd(1, .monotonic);
+
+        conn.state = .reading_header;
+        conn.header_pos = 0;
+        conn.body_pos = 0;
+        conn.write_pos = 0;
+        conn.write_len = 0;
+        if (conn.large_buffer) |buf| {
+            self.allocator.free(buf);
+            conn.large_buffer = null;
+        }
+
+        try self.modifyInterest(conn.fd, linux.EPOLL.IN | linux.EPOLL.ET | linux.EPOLL.RDHUP);
     }
 
     fn closeConnection(self: *EpollWorker, fd: std.posix.fd_t) void {

@@ -8,7 +8,6 @@
 /// 5. Handler B updates another model
 /// 6. Handler C (subscribed to that event) is triggered
 /// 7. Complete chain reaction via message bus
-
 const std = @import("std");
 const message_bus = @import("../src/message_bus/mod.zig");
 const Event = @import("../src/event.zig").Event;
@@ -317,7 +316,8 @@ pub fn main() !void {
     std.log.info("=" ** 70, .{});
 
     std.log.info("\nTrade Model:", .{});
-    std.log.info("  Symbol:   {s}", .{trade.base.getSymbol()});
+    var final_symbol_buffer: [64]u8 = undefined;
+    std.log.info("  Symbol:   {s}", .{try trade.base.copySymbol(&final_symbol_buffer)});
     std.log.info("  Price:    ${d}", .{trade.base.getPrice()});
     std.log.info("  Quantity: {d}", .{trade.base.getQuantity()});
     std.log.info("  Version:  {d}", .{trade.base.getVersion()});

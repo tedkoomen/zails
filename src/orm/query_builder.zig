@@ -1,7 +1,6 @@
 /// ClickHouse Query Builder - Fluent API for query construction
 /// Optimized for ClickHouse semantics (analytics-first, not OLTP)
 /// Tiger Style: errors as values, stack-allocated builders
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -16,6 +15,44 @@ fn escapeSQL(writer: anytype, value: []const u8) !void {
             else => try writer.writeByte(c),
         }
     }
+}
+
+fn isIdentifierStart(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '_';
+}
+
+fn isIdentifierChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+fn isValidIdentifierPath(identifier: []const u8) bool {
+    if (identifier.len == 0) return false;
+
+    var at_segment_start = true;
+    var saw_segment_char = false;
+    for (identifier) |c| {
+        if (c == '.') {
+            if (at_segment_start or !saw_segment_char) return false;
+            at_segment_start = true;
+            saw_segment_char = false;
+            continue;
+        }
+
+        if (at_segment_start) {
+            if (!isIdentifierStart(c)) return false;
+            at_segment_start = false;
+        } else if (!isIdentifierChar(c)) {
+            return false;
+        }
+        saw_segment_char = true;
+    }
+
+    return saw_segment_char;
+}
+
+fn writeIdentifier(writer: anytype, identifier: []const u8) !void {
+    if (!isValidIdentifierPath(identifier)) return error.InvalidIdentifier;
+    try writer.writeAll(identifier);
 }
 
 /// Comparison operators for WHERE clauses
@@ -189,7 +226,7 @@ pub fn QueryBuilder(comptime Model: type) type {
 
             // FROM clause
             try writer.writeAll(" FROM ");
-            try writer.writeAll(self.table_name);
+            try writeIdentifier(writer, self.table_name);
 
             // WHERE clause
             if (self.where_count > 0) {
@@ -202,14 +239,14 @@ pub fn QueryBuilder(comptime Model: type) type {
                 try writer.writeAll(" GROUP BY ");
                 for (self.group_by_fields[0..self.group_by_count], 0..) |field, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(field);
+                    try writeIdentifier(writer, field);
                 }
             }
 
             // ORDER BY clause
             if (self.order_by_field) |field| {
                 try writer.writeAll(" ORDER BY ");
-                try writer.writeAll(field);
+                try writeIdentifier(writer, field);
                 try writer.writeAll(" ");
                 try writer.writeAll(self.order_by_direction.toString());
             }
@@ -231,8 +268,7 @@ pub fn QueryBuilder(comptime Model: type) type {
         pub fn execute(self: *const Self, allocator: Allocator) ![]Model {
             _ = self;
             _ = allocator;
-            // TODO: Implement actual query execution
-            return &[_]Model{};
+            return error.NotImplemented;
         }
 
         /// Count records matching query
@@ -245,15 +281,14 @@ pub fn QueryBuilder(comptime Model: type) type {
             const writer = fbs.writer();
 
             try writer.writeAll("SELECT COUNT(*) FROM ");
-            try writer.writeAll(self.table_name);
+            try writeIdentifier(writer, self.table_name);
 
             if (self.where_count > 0) {
                 try writer.writeAll(" WHERE ");
                 try writeWhereClauses(writer, self.where_clauses[0..self.where_count]);
             }
 
-            // TODO: Execute query and parse result
-            return 0;
+            return error.NotImplemented;
         }
 
         /// Shared WHERE clause writer (used by both buildSQL and count)
@@ -261,7 +296,7 @@ pub fn QueryBuilder(comptime Model: type) type {
             for (clauses, 0..) |clause, i| {
                 if (i > 0) try writer.writeAll(" AND ");
 
-                try writer.writeAll(clause.field);
+                try writeIdentifier(writer, clause.field);
                 try writer.writeAll(" ");
                 try writer.writeAll(clause.op.toString());
                 try writer.writeAll(" ");
@@ -414,6 +449,20 @@ test "query builder SQL injection prevention" {
         "SELECT * FROM users WHERE name = 'O''Brien'",
         sql,
     );
+}
+
+test "query builder rejects invalid identifiers" {
+    const MockModel = struct {
+        id: u64,
+        name: []const u8,
+    };
+
+    const QB = QueryBuilder(MockModel);
+    var qb = QB.init("users");
+    _ = qb.where("name;DROP TABLE users", .eq, "x");
+
+    var buffer: [1024]u8 = undefined;
+    try std.testing.expectError(error.InvalidIdentifier, qb.buildSQL(&buffer));
 }
 
 test "query builder NOT IN clause" {

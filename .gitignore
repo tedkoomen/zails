@@ -7,6 +7,9 @@ zig-out/
 # Claude Code local settings
 .claude/
 
+# Local release drafting
+RELEASE_NOTES.md
+
 # Editor
 *.swp
 *.swo

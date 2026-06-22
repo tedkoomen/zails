@@ -407,8 +407,9 @@ pub fn main() !void {
     std.Thread.sleep(300 * std.time.ns_per_ms);
 
     std.log.info("\n=== Final State ===", .{});
+    var symbol_buffer: [64]u8 = undefined;
     std.log.info("Trade: {s} @ ${d} x {d}", .{
-        trade.base.getSymbol(),
+        try trade.base.copySymbol(&symbol_buffer),
         trade.base.getPrice(),
         trade.base.getQuantity(),
     });

@@ -1,11 +1,48 @@
 /// ORM Model - ActiveRecord-like base model for ClickHouse
 /// Provides .all(), .find(), .where(), .create() methods
 /// Optimized for ClickHouse analytics workloads
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const query_builder = @import("query_builder.zig");
 const field_types = @import("field_types.zig");
+
+fn isIdentifierStart(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '_';
+}
+
+fn isIdentifierChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+fn isValidIdentifierPath(identifier: []const u8) bool {
+    if (identifier.len == 0) return false;
+
+    var at_segment_start = true;
+    var saw_segment_char = false;
+    for (identifier) |c| {
+        if (c == '.') {
+            if (at_segment_start or !saw_segment_char) return false;
+            at_segment_start = true;
+            saw_segment_char = false;
+            continue;
+        }
+
+        if (at_segment_start) {
+            if (!isIdentifierStart(c)) return false;
+            at_segment_start = false;
+        } else if (!isIdentifierChar(c)) {
+            return false;
+        }
+        saw_segment_char = true;
+    }
+
+    return saw_segment_char;
+}
+
+fn writeIdentifier(writer: anytype, identifier: []const u8) !void {
+    if (!isValidIdentifierPath(identifier)) return error.InvalidIdentifier;
+    try writer.writeAll(identifier);
+}
 
 /// Model trait - provides ActiveRecord-like interface
 pub fn Model(comptime table_name: []const u8, comptime fields: anytype) type {
@@ -14,6 +51,14 @@ pub fn Model(comptime table_name: []const u8, comptime fields: anytype) type {
         const fields_info = @typeInfo(@TypeOf(fields));
         if (fields_info != .@"struct") {
             @compileError("fields must be a struct");
+        }
+        if (!isValidIdentifierPath(table_name)) {
+            @compileError("table_name must be a valid SQL identifier path");
+        }
+        for (fields_info.@"struct".fields) |field| {
+            if (!isValidIdentifierPath(field.name)) {
+                @compileError("model field name must be a valid SQL identifier");
+            }
         }
     }
 
@@ -66,8 +111,7 @@ pub fn Model(comptime table_name: []const u8, comptime fields: anytype) type {
         pub fn create(self: Self, allocator: Allocator) !void {
             _ = self;
             _ = allocator;
-            // TODO: Implement insert using async ClickHouse writer
-            // Will use the existing async_clickhouse.zig infrastructure
+            return error.NotImplemented;
         }
 
         /// Build CREATE TABLE statement
@@ -75,7 +119,9 @@ pub fn Model(comptime table_name: []const u8, comptime fields: anytype) type {
             var fbs = std.io.fixedBufferStream(buffer);
             const writer = fbs.writer();
 
-            try writer.print("CREATE TABLE IF NOT EXISTS {s} (\n", .{table_name});
+            try writer.writeAll("CREATE TABLE IF NOT EXISTS ");
+            try writeIdentifier(writer, table_name);
+            try writer.writeAll(" (\n");
 
             // Iterate over field definitions
             const fields_info = @typeInfo(@TypeOf(fields)).@"struct";
@@ -85,7 +131,7 @@ pub fn Model(comptime table_name: []const u8, comptime fields: anytype) type {
                 const field_def = @field(fields, field.name);
 
                 try writer.writeAll("  ");
-                try writer.writeAll(field.name);
+                try writeIdentifier(writer, field.name);
                 try writer.writeAll(" ");
 
                 var type_buffer: [128]u8 = undefined;
@@ -104,7 +150,8 @@ pub fn Model(comptime table_name: []const u8, comptime fields: anytype) type {
             inline for (fields_info.fields) |field| {
                 const field_def = @field(fields, field.name);
                 if (field_def.primary_key) {
-                    try writer.print("ORDER BY {s}", .{field.name});
+                    try writer.writeAll("ORDER BY ");
+                    try writeIdentifier(writer, field.name);
                     break;
                 }
             }

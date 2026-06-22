@@ -4,7 +4,7 @@
 /// execute in parallel.
 
 const std = @import("std");
-const ReactiveModelWithHandlers = @import("../src/model_handler_integration.zig").ReactiveModelWithHandlers;
+const ReactiveModelWithHandlers = @import("../src/experimental/model_handler_integration.zig").ReactiveModelWithHandlers;
 const message_bus = @import("../src/message_bus/mod.zig");
 
 // Simulate slow handlers

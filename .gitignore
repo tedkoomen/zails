@@ -1,10 +1,14 @@
 # Zig build artifacts
 .zig-cache/
+.zig-global-cache/
 zig-cache/
 zig-out/
 
 # Claude Code local settings
 .claude/
+
+# Local release drafting
+RELEASE_NOTES.md
 
 # Editor
 *.swp

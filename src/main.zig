@@ -1,12 +1,10 @@
 /// Main entry point - Convention-based server framework
 /// Handlers are auto-discovered from handlers/ folder at compile time
 /// NO virtual inheritance, NO function pointers - pure comptime dispatch
-
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const SignalHandler = @import("signals.zig").SignalHandler;
 const numa = @import("numa.zig");
-const threadpool_framework = @import("threadpool_framework.zig");
 const epoll_threadpool = @import("epoll_threadpool.zig");
 const handler_registry = @import("handler_registry.zig");
 const config_system = @import("config_system.zig");
@@ -14,6 +12,7 @@ const metrics_mod = @import("metrics.zig");
 const clickhouse_client = @import("clickhouse_client.zig");
 const async_clickhouse = @import("async_clickhouse.zig");
 const message_bus = @import("message_bus/mod.zig");
+const local_ipc = @import("local_ipc.zig");
 const udp = @import("udp/mod.zig");
 const net = std.net;
 
@@ -23,19 +22,19 @@ pub const globals = @import("globals.zig");
 // Import all handlers from handlers/ folder
 const handlers = @import("handlers");
 
+fn setNonBlocking(fd: std.posix.fd_t) !void {
+    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+    const OInt = std.meta.Int(.unsigned, @bitSizeOf(std.posix.O));
+    var open_flags: std.posix.O = @bitCast(@as(OInt, @intCast(flags)));
+    open_flags.NONBLOCK = true;
+    const updated_flags: OInt = @bitCast(open_flags);
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @intCast(updated_flags));
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    std.log.info("=== High-Performance Server Framework ===", .{});
-    std.log.info("Features:", .{});
-    std.log.info("  ✓ Convention-based handlers (handlers/ folder)", .{});
-    std.log.info("  ✓ Comptime dispatch (NO virtual inheritance)", .{});
-    std.log.info("  ✓ Lock-free object pools", .{});
-    std.log.info("  ✓ Lock-free threadpool with work-stealing", .{});
-    std.log.info("  ✓ NUMA-aware worker placement", .{});
-    std.log.info("", .{});
 
     // Parse configuration
     const args = try std.process.argsAlloc(allocator);
@@ -50,37 +49,74 @@ pub fn main() !void {
     };
     defer config.deinit(allocator);
 
-    try config.validate();
-
     // ========================================
     // Initialize Message Bus (Event-Driven Architecture)
     // ========================================
     std.log.info("Initializing message bus...", .{});
+    const bus_worker_count = @max(@as(usize, 4), @min(@as(usize, 8), std.Thread.getCpuCount() catch 4));
     var bus_instance = try message_bus.MessageBus.init(allocator, .{
-        .queue_capacity = 8192,
-        .worker_count = 4,
-        .flush_interval_ms = 50,
+        .queue_capacity = 65536,
+        .worker_count = bus_worker_count,
+        .flush_interval_ms = 1,
+        .overflow_policy = .backpressure,
     });
-    defer bus_instance.deinit();
+    var bus_cleanup_transferred = false;
+    errdefer if (!bus_cleanup_transferred) bus_instance.deinit();
 
     try bus_instance.start();
     globals.global_message_bus = &bus_instance;
+    globals.ctx.message_bus = &bus_instance;
 
-    std.log.info("✓ Message bus started (4 workers, 8192 queue capacity)", .{});
+    std.log.info("✓ Message bus started ({d} workers, 65536 queue capacity, backpressure overflow policy)", .{bus_worker_count});
     std.log.info("", .{});
 
     // Create handler registry (comptime dispatch from handlers/ folder)
     const Registry = handler_registry.HandlerRegistry(handlers.handler_modules);
     var registry = try Registry.init(allocator);
-    defer registry.deinit();
+    bus_cleanup_transferred = true;
+    defer {
+        bus_instance.deinit();
+        registry.deinit();
+    }
 
     // Post-initialize handlers (configure with message bus, etc.)
     try registry.postInit(allocator);
 
     // Initialize runtime controller for metrics and profiling
-    // Create default config for runtime controller
-    var default_config = try config_system.ZailsConfig.default(allocator);
+    var default_config = if (config.config_path) |path| blk: {
+        std.log.info("Loading config file: {s}", .{path});
+        break :blk config_system.ZailsConfig.loadFromFile(allocator, path) catch |err| {
+            std.log.err("Failed to load config file {s}: {}", .{ path, err });
+            return err;
+        };
+    } else try config_system.ZailsConfig.default(allocator);
     defer default_config.deinit(allocator);
+
+    if (config.config_path != null) {
+        if (!config.ports_from_cli) {
+            allocator.free(config.ports);
+            config.ports = try allocator.dupe(u16, default_config.server.ports);
+        }
+        if (config.worker_threads == null) {
+            config.worker_threads = default_config.server.worker_threads;
+        }
+        config.enable_numa = default_config.server.enable_numa;
+        config.pool_size = default_config.server.pool_size;
+        config.max_connections = default_config.server.max_connections;
+    }
+
+    try config.validate();
+
+    if (config.verbose) {
+        std.log.info("=== High-Performance Server Framework ===", .{});
+        std.log.info("Features:", .{});
+        std.log.info("  ✓ Convention-based handlers (handlers/ folder)", .{});
+        std.log.info("  ✓ Comptime dispatch (NO virtual inheritance)", .{});
+        std.log.info("  ✓ Lock-free object pools", .{});
+        std.log.info("  ✓ Epoll-based event-driven workers", .{});
+        std.log.info("  ✓ NUMA-aware worker placement", .{});
+        std.log.info("", .{});
+    }
 
     // ========================================
     // Initialize UDP Feed Manager (Exchange Connectivity)
@@ -118,6 +154,7 @@ pub fn main() !void {
         feed_manager = try FM.init(allocator, feed_configs, &bus_instance);
         try feed_manager.?.start();
         globals.global_feed_manager = &feed_manager.?;
+        globals.ctx.feed_manager = &feed_manager.?;
         std.log.info("✓ Feed manager started ({} feed(s))", .{feed_configs.len});
     } else {
         std.log.info("Feed manager disabled (no feeds configured)", .{});
@@ -132,10 +169,12 @@ pub fn main() !void {
 
     var runtime_controller = config_system.RuntimeController.init(&default_config);
     globals.global_runtime_controller = &runtime_controller;
+    globals.ctx.runtime_controller = &runtime_controller;
 
     // Initialize metrics registry
     var metrics_registry = metrics_mod.MetricsRegistry.init();
     globals.global_metrics = &metrics_registry;
+    globals.ctx.metrics = &metrics_registry;
 
     // Initialize ClickHouse writer if enabled
     var clickhouse_writer: ?*async_clickhouse.AsyncClickHouseWriter = null;
@@ -184,6 +223,7 @@ pub fn main() !void {
 
         // Initialize global - the writer's background thread ensures visibility
         globals.global_clickhouse = clickhouse_writer;
+        globals.ctx.clickhouse = clickhouse_writer;
         std.log.info("ClickHouse writer initialized (host={s}, port={d}, database={s})", .{
             host,
             port,
@@ -251,6 +291,33 @@ pub fn main() !void {
         }
     }
 
+    const LocalIpcServer = local_ipc.LocalIpcServer(@TypeOf(registry));
+    var local_ipc_servers = try allocator.alloc(?LocalIpcServer, config.ports.len);
+    defer allocator.free(local_ipc_servers);
+    @memset(local_ipc_servers, null);
+
+    for (config.ports, 0..) |port, i| {
+        local_ipc_servers[i] = LocalIpcServer.init(allocator, port, &registry) catch |err| {
+            std.log.warn("Local IPC disabled for port {}: {}", .{ port, err });
+            continue;
+        };
+        if (local_ipc_servers[i]) |*server| {
+            server.start() catch |err| {
+                std.log.warn("Local IPC worker failed for port {}: {}", .{ port, err });
+                server.deinit();
+                local_ipc_servers[i] = null;
+            };
+        }
+    }
+
+    defer {
+        for (local_ipc_servers) |*server_opt| {
+            if (server_opt.*) |*server| {
+                server.deinit();
+            }
+        }
+    }
+
     // Create listeners with proper socket options
     var listeners = try allocator.alloc(net.Server, config.ports.len);
     defer allocator.free(listeners);
@@ -263,6 +330,7 @@ pub fn main() !void {
 
         // Set TCP socket options for performance
         const sock_fd = listeners[i].stream.handle;
+        try setNonBlocking(sock_fd);
 
         // SO_REUSEPORT - kernel-level load balancing across workers
         const reuseport: c_int = 1;
@@ -334,14 +402,16 @@ pub fn main() !void {
     var signal_handler = SignalHandler.init(&shutdown);
     signal_handler.register();
 
-    std.log.info("", .{});
-    std.log.info("=== Server Running ===", .{});
-    std.log.info("Processing requests with:", .{});
-    std.log.info("  • Zero allocations in hot path (arena allocators)", .{});
-    std.log.info("  • Optimized syscalls (epoll)", .{});
-    std.log.info("  • Zero virtual inheritance (comptime dispatch)", .{});
-    std.log.info("Press Ctrl+C to shutdown", .{});
-    std.log.info("", .{});
+    std.log.info("Server started on {} port(s)", .{config.ports.len});
+
+    if (config.verbose) {
+        std.log.info("=== Server Running ===", .{});
+        std.log.info("Processing requests with:", .{});
+        std.log.info("  • Zero allocations in hot path (arena allocators)", .{});
+        std.log.info("  • Optimized syscalls (epoll)", .{});
+        std.log.info("  • Zero virtual inheritance (comptime dispatch)", .{});
+        std.log.info("Press Ctrl+C to shutdown", .{});
+    }
 
     // Create epoll for efficient multi-listener accept
     const epoll_fd = try std.posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
@@ -381,10 +451,10 @@ pub fn main() !void {
 
             var listener = &listeners[listener_idx];
 
-            // Accept all pending connections on this listener
-            while (true) {
+            accept_drain: while (true) {
                 // Atomically check and increment connection count to prevent TOCTOU race
                 // Use compare-and-swap loop to ensure limit is never exceeded
+                var reserved_connection = false;
                 var retry_count: usize = 0;
                 while (retry_count < 100) : (retry_count += 1) {
                     const current_active = active_connections.load(.monotonic);
@@ -394,7 +464,7 @@ pub fn main() !void {
                         if (rejected_connections % 1000 == 1) {
                             std.log.warn("Connection limit reached ({}/{}), rejecting new connections ({} total rejected)", .{ current_active, config.max_connections, rejected_connections });
                         }
-                        break;
+                        break :accept_drain;
                     }
 
                     // Try to reserve a connection slot atomically
@@ -409,53 +479,66 @@ pub fn main() !void {
                     }
 
                     // Successfully reserved a slot, now accept the connection
-                    const connection = listener.accept() catch |err| {
-                        // Accept failed, release the reservation
-                        _ = active_connections.fetchSub(1, .monotonic);
+                    reserved_connection = true;
+                    break;
+                }
 
-                        if (err == error.WouldBlock) break; // No more pending
-                        std.log.debug("Accept error on port {}: {}", .{ config.ports[listener_idx], err });
-                        break;
-                    };
+                if (!reserved_connection) {
+                    std.log.warn("Failed to reserve connection slot after retries", .{});
+                    break :accept_drain;
+                }
 
-                    // Set TCP_NODELAY on accepted connection
-                    const tcp_nodelay: c_int = 1;
+                const connection = listener.accept() catch |err| {
+                    // Accept failed, release the reservation
+                    _ = active_connections.fetchSub(1, .monotonic);
+
+                    if (err == error.WouldBlock) break :accept_drain; // No more pending
+                    std.log.debug("Accept error on port {}: {}", .{ config.ports[listener_idx], err });
+                    break :accept_drain;
+                };
+
+                setNonBlocking(connection.stream.handle) catch |err| {
+                    std.log.err("Failed to set accepted connection non-blocking: {}", .{err});
+                    _ = active_connections.fetchSub(1, .monotonic);
+                    connection.stream.close();
+                    continue :accept_drain;
+                };
+
+                // Set TCP_NODELAY on accepted connection
+                const tcp_nodelay: c_int = 1;
+                _ = std.posix.setsockopt(
+                    connection.stream.handle,
+                    std.posix.IPPROTO.TCP,
+                    std.posix.TCP.NODELAY,
+                    &std.mem.toBytes(tcp_nodelay),
+                ) catch {};
+
+                // Set TCP_QUICKACK for faster ACKs
+                if (@hasDecl(std.posix.TCP, "QUICKACK")) {
+                    const quickack: c_int = 1;
                     _ = std.posix.setsockopt(
                         connection.stream.handle,
                         std.posix.IPPROTO.TCP,
-                        std.posix.TCP.NODELAY,
-                        &std.mem.toBytes(tcp_nodelay),
+                        std.posix.TCP.QUICKACK,
+                        &std.mem.toBytes(quickack),
                     ) catch {};
-
-                    // Set TCP_QUICKACK for faster ACKs
-                    if (@hasDecl(std.posix.TCP, "QUICKACK")) {
-                        const quickack: c_int = 1;
-                        _ = std.posix.setsockopt(
-                            connection.stream.handle,
-                            std.posix.IPPROTO.TCP,
-                            std.posix.TCP.QUICKACK,
-                            &std.mem.toBytes(quickack),
-                        ) catch {};
-                    }
-
-
-
-                    // Route to NUMA-local threadpool (epoll-based)
-                    const node_idx = listener_idx % topology.nodes.len;
-                    thread_pools[node_idx].spawn(connection) catch |err| {
-                        std.log.err("Failed to add connection to epoll: {}", .{err});
-                        _ = active_connections.fetchSub(1, .monotonic);
-                        connection.stream.close();
-                        break;
-                    };
-
-                    connection_count += 1;
-
-                    if (connection_count % 10000 == 0) {
-                        std.log.info("Processed {} connections ({} active, {} rejected)", .{ connection_count, active_connections.load(.monotonic), rejected_connections });
-                    }
-                    break; // Successfully processed one connection, try next
                 }
+
+                // Route to NUMA-local threadpool (epoll-based)
+                const node_idx = listener_idx % topology.nodes.len;
+                thread_pools[node_idx].spawn(connection) catch |err| {
+                    std.log.err("Failed to add connection to epoll: {}", .{err});
+                    _ = active_connections.fetchSub(1, .monotonic);
+                    connection.stream.close();
+                    continue :accept_drain;
+                };
+
+                connection_count += 1;
+
+                if (connection_count % 10000 == 0) {
+                    std.log.info("Processed {} connections ({} active, {} rejected)", .{ connection_count, active_connections.load(.monotonic), rejected_connections });
+                }
+                continue :accept_drain;
             }
         }
     }

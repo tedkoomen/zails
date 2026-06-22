@@ -1,7 +1,6 @@
 /// Core server framework - minimal, no business logic
 /// Uses comptime handler registry (NO mutexes, NO virtual inheritance)
 /// Tiger Style: Request handling NEVER THROWS - all errors are values
-
 const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
@@ -171,6 +170,14 @@ pub fn handleConnection(
                     const request_end_ns = std.time.nanoTimestamp();
                     const elapsed_ns = request_end_ns - request_start_ns;
                     const latency_us: u64 = if (elapsed_ns > 0) @intCast(@divTrunc(elapsed_ns, 1000)) else 0;
+
+                    if (globals.global_metrics) |metrics| {
+                        if (handler_response.isOk()) {
+                            metrics.recordRequest(msg_type, latency_us);
+                        } else {
+                            metrics.recordError(msg_type);
+                        }
+                    }
 
                     // Record metrics to ClickHouse if enabled
                     if (globals.global_clickhouse) |clickhouse_writer| {

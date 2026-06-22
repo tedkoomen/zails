@@ -1,7 +1,6 @@
 /// Metrics handler - exposes Prometheus metrics endpoint
 /// Message type 255 reserved for metrics
 /// Tiger Style: NEVER THROWS - all errors are values
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const globals = if (@hasDecl(@import("root"), "globals")) @import("root").globals else struct {};
@@ -65,11 +64,11 @@ pub fn handle(
     // Copy to response buffer — return error if truncated
     if (output.len > response_buffer.len) {
         std.log.warn("Metrics output truncated: {d} bytes available, {d} bytes needed", .{ response_buffer.len, output.len });
+        return result.HandlerResponse.err(.message_too_large);
     }
-    const len = @min(output.len, response_buffer.len);
-    @memcpy(response_buffer[0..len], output[0..len]);
+    @memcpy(response_buffer[0..output.len], output);
 
-    return result.HandlerResponse.ok(response_buffer[0..len]);
+    return result.HandlerResponse.ok(response_buffer[0..output.len]);
 }
 
 const Format = enum {

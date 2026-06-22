@@ -119,6 +119,11 @@ inline fn safeSlice(data: []const u8, pos: usize, len: u64) ![]const u8 {
     return data[pos..][0..length];
 }
 
+inline fn decodeWireType(tag_value: u64) !WireType {
+    const raw: u3 = @intCast(tag_value & 0x7);
+    return std.meta.intToEnum(WireType, raw) catch error.InvalidWireType;
+}
+
 /// Skip an unknown field based on wire type
 fn skipField(wire_type: WireType, data: []const u8, pos: usize) !usize {
     var new_pos = pos;
@@ -177,10 +182,8 @@ pub fn encodeVarintField(field_number: u32, value: i64, buffer: []u8) !usize {
     pos += try encodeVarint(tag, buffer[pos..]);
 
     // Write value (using zigzag encoding for signed integers)
-    const unsigned: u64 = if (value >= 0)
-        @intCast(value << 1)
-    else
-        @intCast(((-value - 1) << 1) | 1);
+    // Bitwise zigzag avoids overflow on minInt(i64) that arithmetic (-value) would cause
+    const unsigned: u64 = @bitCast((value +% value) ^ (value >> 63));
 
     pos += try encodeVarint(unsigned, buffer[pos..]);
 
@@ -275,7 +278,7 @@ pub fn decodeBaseRequest(allocator: Allocator, data: []const u8) !BaseRequest {
         pos += tag_result.bytes_read;
 
         const field_number = tag_result.value >> 3;
-        const wire_type: WireType = @enumFromInt(@as(u3, @intCast(tag_result.value & 0x7)));
+        const wire_type = try decodeWireType(tag_result.value);
 
         switch (field_number) {
             1 => { // request_id
@@ -317,7 +320,7 @@ pub fn decodeBaseRequest(allocator: Allocator, data: []const u8) !BaseRequest {
                     entry_pos += entry_tag.bytes_read;
 
                     const entry_field = entry_tag.value >> 3;
-                    const entry_wire_type: WireType = @enumFromInt(@as(u3, @intCast(entry_tag.value & 0x7)));
+                    const entry_wire_type = try decodeWireType(entry_tag.value);
 
                     if (entry_wire_type != .length_delimited) {
                         // Skip non-length-delimited inner fields
@@ -377,7 +380,7 @@ pub fn decodeEchoRequest(allocator: Allocator, data: []const u8) !EchoRequest {
         pos += tag_result.bytes_read;
 
         const field_number = tag_result.value >> 3;
-        const wire_type: WireType = @enumFromInt(@as(u3, @intCast(tag_result.value & 0x7)));
+        const wire_type = try decodeWireType(tag_result.value);
 
         switch (field_number) {
             1 => { // base
@@ -422,7 +425,7 @@ pub fn decodeEchoResponse(allocator: Allocator, data: []const u8) !EchoResponse 
         pos += tag_result.bytes_read;
 
         const field_number = tag_result.value >> 3;
-        const wire_type: WireType = @enumFromInt(@as(u3, @intCast(tag_result.value & 0x7)));
+        const wire_type = try decodeWireType(tag_result.value);
 
         switch (field_number) {
             1 => { // request_id
@@ -490,6 +493,11 @@ pub const GrpcStatus = enum(u32) {
     data_loss = 15,
     unauthenticated = 16,
 };
+
+inline fn decodeGrpcStatus(value: u64) !GrpcStatus {
+    if (value > std.math.maxInt(u32)) return error.InvalidEnumValue;
+    return std.meta.intToEnum(GrpcStatus, @as(u32, @intCast(value))) catch error.InvalidEnumValue;
+}
 
 /// Service method definition (comptime routing info)
 pub const ServiceMethod = struct {
@@ -575,7 +583,7 @@ pub fn decodeGrpcRequest(allocator: Allocator, data: []const u8) !GrpcRequest {
         pos += tag_result.bytes_read;
 
         const field_number = tag_result.value >> 3;
-        const wire_type: WireType = @enumFromInt(@as(u3, @intCast(tag_result.value & 0x7)));
+        const wire_type = try decodeWireType(tag_result.value);
 
         switch (field_number) {
             1 => { // base
@@ -668,7 +676,7 @@ pub fn decodeGrpcResponse(allocator: Allocator, data: []const u8) !GrpcResponse 
         pos += tag_result.bytes_read;
 
         const field_number = tag_result.value >> 3;
-        const wire_type: WireType = @enumFromInt(@as(u3, @intCast(tag_result.value & 0x7)));
+        const wire_type = try decodeWireType(tag_result.value);
 
         switch (field_number) {
             1 => { // request_id
@@ -686,7 +694,7 @@ pub fn decodeGrpcResponse(allocator: Allocator, data: []const u8) !GrpcResponse 
                 const val_result = try decodeVarint(data[pos..]);
                 pos += val_result.bytes_read;
 
-                response.status_code = @enumFromInt(@as(u32, @intCast(val_result.value)));
+                response.status_code = try decodeGrpcStatus(val_result.value);
             },
             3 => { // status_message
                 if (wire_type != .length_delimited) return error.InvalidWireType;
@@ -733,6 +741,13 @@ test "varint encoding/decoding" {
     const len2 = try encodeVarint(300, &buffer);
     const result2 = try decodeVarint(buffer[0..len2]);
     try std.testing.expectEqual(@as(u64, 300), result2.value);
+}
+
+test "decode rejects invalid protobuf wire type" {
+    const allocator = std.testing.allocator;
+    const bad = [_]u8{0x0e}; // field 1, reserved wire type 6
+
+    try std.testing.expectError(error.InvalidWireType, decodeEchoRequest(allocator, &bad));
 }
 
 test "echo request encoding/decoding" {

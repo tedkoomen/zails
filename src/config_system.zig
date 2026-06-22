@@ -1,6 +1,5 @@
 /// Advanced configuration system for Zails
 /// Supports YAML/JSON config files with runtime reloading
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -12,6 +11,7 @@ pub const ZailsConfig = struct {
     sla: SLAConfig,
     profiling: ProfilingConfig,
     feeds: FeedsConfig,
+    owned_strings: []const []const u8 = &[_][]const u8{},
 
     pub const ServerConfig = struct {
         ports: []u16,
@@ -116,8 +116,8 @@ pub const ZailsConfig = struct {
     };
 
     /// Load configuration from file
-    /// ⚠️  NOT IMPLEMENTED - Use default() or build ZailsConfig manually ⚠️
-    /// JSON and YAML parsing are stubbed out and will return error.NotImplemented
+    /// JSON is supported via std.json. YAML returns error.UnsupportedConfigFormat
+    /// unless a YAML parser is added to the project.
     pub fn loadFromFile(allocator: Allocator, path: []const u8) !ZailsConfig {
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
@@ -135,22 +135,204 @@ pub const ZailsConfig = struct {
         }
     }
 
+    fn objectField(object: std.json.ObjectMap, name: []const u8) ?std.json.Value {
+        return object.get(name);
+    }
+
+    fn boolField(object: std.json.ObjectMap, name: []const u8, current: bool) !bool {
+        const value = objectField(object, name) orelse return current;
+        return switch (value) {
+            .bool => |b| b,
+            else => error.InvalidConfigValue,
+        };
+    }
+
+    fn usizeField(object: std.json.ObjectMap, name: []const u8, current: usize) !usize {
+        const value = objectField(object, name) orelse return current;
+        return switch (value) {
+            .integer => |i| if (i < 0 or i > std.math.maxInt(usize)) error.InvalidConfigValue else @as(usize, @intCast(i)),
+            else => error.InvalidConfigValue,
+        };
+    }
+
+    fn u64Field(object: std.json.ObjectMap, name: []const u8, current: u64) !u64 {
+        const value = objectField(object, name) orelse return current;
+        return switch (value) {
+            .integer => |i| if (i < 0) error.InvalidConfigValue else @as(u64, @intCast(i)),
+            else => error.InvalidConfigValue,
+        };
+    }
+
+    fn u16Field(object: std.json.ObjectMap, name: []const u8, current: u16) !u16 {
+        const value = try u64Field(object, name, current);
+        if (value > std.math.maxInt(u16)) return error.InvalidConfigValue;
+        return @intCast(value);
+    }
+
+    fn f64Field(object: std.json.ObjectMap, name: []const u8, current: f64) !f64 {
+        const value = objectField(object, name) orelse return current;
+        return switch (value) {
+            .float => |f| f,
+            .integer => |i| @floatFromInt(i),
+            else => error.InvalidConfigValue,
+        };
+    }
+
+    fn ownedStringField(
+        allocator: Allocator,
+        owned_strings: *std.ArrayList([]const u8),
+        object: std.json.ObjectMap,
+        name: []const u8,
+        current: []const u8,
+    ) ![]const u8 {
+        const value = objectField(object, name) orelse return current;
+        if (value != .string) return error.InvalidConfigValue;
+        const copy = try allocator.dupe(u8, value.string);
+        errdefer allocator.free(copy);
+        try owned_strings.append(allocator, copy);
+        return copy;
+    }
+
+    fn parsePorts(allocator: Allocator, value: std.json.Value) ![]u16 {
+        if (value != .array) return error.InvalidConfigValue;
+        if (value.array.items.len == 0) return error.InvalidConfigValue;
+
+        var ports = std.ArrayList(u16){};
+        errdefer ports.deinit(allocator);
+
+        for (value.array.items) |item| {
+            if (item != .integer or item.integer < 0 or item.integer > std.math.maxInt(u16)) {
+                return error.InvalidConfigValue;
+            }
+            try ports.append(allocator, @intCast(item.integer));
+        }
+
+        return ports.toOwnedSlice(allocator);
+    }
+
     /// Parse JSON configuration
-    /// TODO: Implement using std.json.parseFromSlice
     fn parseJSON(allocator: Allocator, content: []const u8) !ZailsConfig {
-        _ = allocator;
-        _ = content;
-        std.log.err("JSON config parsing not implemented - use ZailsConfig.default() instead", .{});
-        return error.NotImplemented;
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return error.InvalidConfigValue;
+        const root = parsed.value.object;
+
+        var config = try ZailsConfig.default(allocator);
+        errdefer config.deinit(allocator);
+
+        var owned_strings = std.ArrayList([]const u8){};
+        errdefer {
+            for (owned_strings.items) |s| allocator.free(s);
+            owned_strings.deinit(allocator);
+        }
+
+        if (objectField(root, "server")) |server_value| {
+            if (server_value != .object) return error.InvalidConfigValue;
+            const server = server_value.object;
+
+            if (objectField(server, "ports")) |ports_value| {
+                const new_ports = try parsePorts(allocator, ports_value);
+                allocator.free(config.server.ports);
+                config.server.ports = new_ports;
+            }
+
+            if (objectField(server, "worker_threads")) |worker_value| {
+                config.server.worker_threads = switch (worker_value) {
+                    .integer => |i| if (i < 0 or i > std.math.maxInt(usize)) return error.InvalidConfigValue else @as(usize, @intCast(i)),
+                    .string => |s| if (std.mem.eql(u8, s, "auto")) null else return error.InvalidConfigValue,
+                    .null => null,
+                    else => return error.InvalidConfigValue,
+                };
+            }
+
+            config.server.enable_numa = try boolField(server, "enable_numa", config.server.enable_numa);
+            config.server.pool_size = try usizeField(server, "pool_size", config.server.pool_size);
+            config.server.max_connections = try usizeField(server, "max_connections", config.server.max_connections);
+            config.server.read_timeout_ms = try u64Field(server, "read_timeout_ms", config.server.read_timeout_ms);
+            config.server.write_timeout_ms = try u64Field(server, "write_timeout_ms", config.server.write_timeout_ms);
+        }
+
+        if (objectField(root, "metrics")) |metrics_value| {
+            if (metrics_value != .object) return error.InvalidConfigValue;
+            const metrics_obj = metrics_value.object;
+            config.metrics.enabled = try boolField(metrics_obj, "enabled", config.metrics.enabled);
+            config.metrics.export_interval_seconds = try u64Field(metrics_obj, "export_interval_seconds", config.metrics.export_interval_seconds);
+
+            if (objectField(metrics_obj, "prometheus")) |prom_value| {
+                if (prom_value != .object) return error.InvalidConfigValue;
+                const prom = prom_value.object;
+                config.metrics.prometheus.enabled = try boolField(prom, "enabled", config.metrics.prometheus.enabled);
+                config.metrics.prometheus.port = try u16Field(prom, "port", config.metrics.prometheus.port);
+                config.metrics.prometheus.path = try ownedStringField(allocator, &owned_strings, prom, "path", config.metrics.prometheus.path);
+            }
+
+            if (objectField(metrics_obj, "statsd")) |statsd_value| {
+                if (statsd_value != .object) return error.InvalidConfigValue;
+                const statsd = statsd_value.object;
+                config.metrics.statsd.enabled = try boolField(statsd, "enabled", config.metrics.statsd.enabled);
+                config.metrics.statsd.host = try ownedStringField(allocator, &owned_strings, statsd, "host", config.metrics.statsd.host);
+                config.metrics.statsd.port = try u16Field(statsd, "port", config.metrics.statsd.port);
+                config.metrics.statsd.prefix = try ownedStringField(allocator, &owned_strings, statsd, "prefix", config.metrics.statsd.prefix);
+            }
+        }
+
+        if (objectField(root, "persistence")) |persistence_value| {
+            if (persistence_value != .object) return error.InvalidConfigValue;
+            const persistence = persistence_value.object;
+            config.persistence.enabled = try boolField(persistence, "enabled", config.persistence.enabled);
+            config.persistence.connection_string = try ownedStringField(allocator, &owned_strings, persistence, "connection_string", config.persistence.connection_string);
+            config.persistence.pool_size = try usizeField(persistence, "pool_size", config.persistence.pool_size);
+            config.persistence.timeout_ms = try u64Field(persistence, "timeout_ms", config.persistence.timeout_ms);
+
+            if (objectField(persistence, "backend")) |backend_value| {
+                if (backend_value != .string) return error.InvalidConfigValue;
+                config.persistence.backend = std.meta.stringToEnum(PersistenceConfig.BackendType, backend_value.string) orelse return error.InvalidConfigValue;
+            }
+
+            if (objectField(persistence, "clickhouse")) |clickhouse_value| {
+                if (clickhouse_value != .object) return error.InvalidConfigValue;
+                const clickhouse = clickhouse_value.object;
+                config.persistence.clickhouse.enabled = try boolField(clickhouse, "enabled", config.persistence.clickhouse.enabled);
+                config.persistence.clickhouse.url = try ownedStringField(allocator, &owned_strings, clickhouse, "url", config.persistence.clickhouse.url);
+                config.persistence.clickhouse.database = try ownedStringField(allocator, &owned_strings, clickhouse, "database", config.persistence.clickhouse.database);
+                config.persistence.clickhouse.username = try ownedStringField(allocator, &owned_strings, clickhouse, "username", config.persistence.clickhouse.username);
+                config.persistence.clickhouse.password = try ownedStringField(allocator, &owned_strings, clickhouse, "password", config.persistence.clickhouse.password);
+                config.persistence.clickhouse.use_tls = try boolField(clickhouse, "use_tls", config.persistence.clickhouse.use_tls);
+                config.persistence.clickhouse.batch_size = try usizeField(clickhouse, "batch_size", config.persistence.clickhouse.batch_size);
+                config.persistence.clickhouse.flush_interval_seconds = try u64Field(clickhouse, "flush_interval_seconds", config.persistence.clickhouse.flush_interval_seconds);
+                config.persistence.clickhouse.buffer_capacity = try usizeField(clickhouse, "buffer_capacity", config.persistence.clickhouse.buffer_capacity);
+                config.persistence.clickhouse.pool_size = try usizeField(clickhouse, "pool_size", config.persistence.clickhouse.pool_size);
+                config.persistence.clickhouse.table_name = try ownedStringField(allocator, &owned_strings, clickhouse, "table_name", config.persistence.clickhouse.table_name);
+            }
+        }
+
+        if (objectField(root, "profiling")) |profiling_value| {
+            if (profiling_value != .object) return error.InvalidConfigValue;
+            const profiling = profiling_value.object;
+            config.profiling.enabled = try boolField(profiling, "enabled", config.profiling.enabled);
+            config.profiling.cpu_profiling = try boolField(profiling, "cpu_profiling", config.profiling.cpu_profiling);
+            config.profiling.memory_profiling = try boolField(profiling, "memory_profiling", config.profiling.memory_profiling);
+            config.profiling.trace_sampling = try boolField(profiling, "trace_sampling", config.profiling.trace_sampling);
+            config.profiling.sampling_rate = try f64Field(profiling, "sampling_rate", config.profiling.sampling_rate);
+            config.profiling.export_flame_graphs = try boolField(profiling, "export_flame_graphs", config.profiling.export_flame_graphs);
+        }
+
+        if (objectField(root, "feeds")) |feeds_value| {
+            if (feeds_value != .object) return error.InvalidConfigValue;
+            config.feeds.enabled = try boolField(feeds_value.object, "enabled", config.feeds.enabled);
+        }
+
+        config.owned_strings = try owned_strings.toOwnedSlice(allocator);
+        return config;
     }
 
     /// Parse YAML configuration
-    /// TODO: Implement using external YAML parser library
     fn parseYAML(allocator: Allocator, content: []const u8) !ZailsConfig {
         _ = allocator;
         _ = content;
-        std.log.err("YAML config parsing not implemented - use ZailsConfig.default() instead", .{});
-        return error.NotImplemented;
+        std.log.err("YAML config parsing requires a YAML parser dependency; use JSON config for now", .{});
+        return error.UnsupportedConfigFormat;
     }
 
     /// Generate default configuration
@@ -219,6 +401,7 @@ pub const ZailsConfig = struct {
                 .enabled = false,
                 .feeds = &[_]FeedsConfig.FeedConfigEntry{},
             },
+            .owned_strings = &[_][]const u8{},
         };
     }
 
@@ -309,7 +492,12 @@ pub const ZailsConfig = struct {
 
     pub fn deinit(self: *ZailsConfig, allocator: Allocator) void {
         allocator.free(self.server.ports);
-        // Free other allocated fields as needed
+        for (self.owned_strings) |s| {
+            allocator.free(s);
+        }
+        if (self.owned_strings.len > 0) {
+            allocator.free(self.owned_strings);
+        }
     }
 };
 
@@ -369,3 +557,39 @@ pub const RuntimeController = struct {
             self.cpu_profiling_enabled.load(.acquire);
     }
 };
+
+test "parse JSON config overrides core fields" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "server": {
+        \\    "ports": [9000, 9001],
+        \\    "worker_threads": 8,
+        \\    "enable_numa": false,
+        \\    "max_connections": 1234
+        \\  },
+        \\  "metrics": {
+        \\    "enabled": false,
+        \\    "prometheus": { "path": "/internal/metrics" }
+        \\  },
+        \\  "persistence": {
+        \\    "backend": "clickhouse",
+        \\    "clickhouse": { "enabled": true, "database": "testdb" }
+        \\  }
+        \\}
+    ;
+    var config = try ZailsConfig.parseJSON(allocator, json);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), config.server.ports.len);
+    try std.testing.expectEqual(@as(u16, 9000), config.server.ports[0]);
+    try std.testing.expectEqual(@as(?usize, 8), config.server.worker_threads);
+    try std.testing.expectEqual(false, config.server.enable_numa);
+    try std.testing.expectEqual(@as(usize, 1234), config.server.max_connections);
+    try std.testing.expectEqual(false, config.metrics.enabled);
+    try std.testing.expectEqualStrings("/internal/metrics", config.metrics.prometheus.path);
+    try std.testing.expectEqual(.clickhouse, config.persistence.backend);
+    try std.testing.expectEqual(true, config.persistence.clickhouse.enabled);
+    try std.testing.expectEqualStrings("testdb", config.persistence.clickhouse.database);
+}

@@ -5,8 +5,6 @@
 ///   1. Drop a .zig file in handlers/ directory
 ///   2. Export MESSAGE_TYPE, Context, and handle() function
 ///   3. Run `zails build`
-
-
 const std = @import("std");
 
 // Auto-imported handler modules
@@ -16,6 +14,7 @@ pub const echo_handler = @import("echo_handler.zig");
 pub const example_handler = @import("example_handler.zig");
 pub const metrics_handler = @import("metrics_handler.zig");
 pub const ping_handler = @import("ping_handler.zig");
+pub const subscription_handler = @import("subscription_handler.zig");
 pub const test_handler = @import("test_handler.zig");
 
 /// List of all handler modules (compile-time)
@@ -27,6 +26,7 @@ pub const handler_modules = .{
     example_handler,
     metrics_handler,
     ping_handler,
+    subscription_handler,
     test_handler,
 };
 

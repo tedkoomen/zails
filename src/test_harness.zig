@@ -1,10 +1,10 @@
 /// Comprehensive test harness for Zails
 /// Includes unit tests, load tests, and stress tests with assertions
-
 const std = @import("std");
 const net = std.net;
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
+const local_ipc = @import("local_ipc.zig");
 
 const LOAD_TEST_DURATION_SECS = 10;
 const RAMP_UP_SECS = 2;
@@ -27,6 +27,8 @@ pub const TestConfig = struct {
     message_type: u8,
     payload_size: usize,
     ramp_up: bool,
+    persistent_connections: bool = false,
+    use_local_ipc: bool = false,
 
     // Progress reporting
     progress_interval_seconds: u64, // 0 = disabled
@@ -147,6 +149,14 @@ pub fn runLoadTest(allocator: Allocator, config: TestConfig) !TestResults {
     }
     std.log.info("  Message type: {}", .{config.message_type});
     std.log.info("  Payload size: {} bytes", .{config.payload_size});
+    std.log.info("  Connection mode: {s}", .{
+        if (config.use_local_ipc)
+            "local-ipc"
+        else if (config.persistent_connections)
+            "persistent"
+        else
+            "per-request",
+    });
     std.log.info("", .{});
 
     var stats = ClientStats.init(allocator);
@@ -181,21 +191,65 @@ pub fn runLoadTest(allocator: Allocator, config: TestConfig) !TestResults {
                 defer context.allocator.destroy(context);
 
                 var requests_sent: usize = 0;
+                var persistent_stream: ?net.Stream = null;
+                defer if (persistent_stream) |stream| {
+                    stream.close();
+                };
 
                 // Check both request count and shutdown flag
                 while (!context.test_ctx.shouldStop(requests_sent)) {
                     const start = std.time.microTimestamp();
 
-                    sendRequest(
-                        context.allocator,
-                        context.config.port,
-                        context.config.message_type,
-                        context.config.payload_size,
-                    ) catch {
-                        context.test_ctx.stats.recordFailure();
-                        requests_sent += 1;
-                        continue;
-                    };
+                    if (context.config.use_local_ipc) {
+                        sendLocalIpcRequest(
+                            context.allocator,
+                            context.config.port,
+                            context.config.message_type,
+                            context.config.payload_size,
+                        ) catch {
+                            context.test_ctx.stats.recordFailure();
+                            requests_sent += 1;
+                            continue;
+                        };
+                    } else if (context.config.persistent_connections) {
+                        if (persistent_stream == null) {
+                            const address = net.Address.parseIp("127.0.0.1", context.config.port) catch {
+                                context.test_ctx.stats.recordFailure();
+                                requests_sent += 1;
+                                continue;
+                            };
+                            persistent_stream = net.tcpConnectToAddress(address) catch {
+                                context.test_ctx.stats.recordFailure();
+                                requests_sent += 1;
+                                continue;
+                            };
+                        }
+
+                        sendRequestOnStream(
+                            persistent_stream.?,
+                            context.config.message_type,
+                            context.config.payload_size,
+                        ) catch {
+                            if (persistent_stream) |stream| {
+                                stream.close();
+                            }
+                            persistent_stream = null;
+                            context.test_ctx.stats.recordFailure();
+                            requests_sent += 1;
+                            continue;
+                        };
+                    } else {
+                        sendRequest(
+                            context.allocator,
+                            context.config.port,
+                            context.config.message_type,
+                            context.config.payload_size,
+                        ) catch {
+                            context.test_ctx.stats.recordFailure();
+                            requests_sent += 1;
+                            continue;
+                        };
+                    }
 
                     const end = std.time.microTimestamp();
                     const latency_us: u64 = @intCast(end - start);
@@ -379,33 +433,89 @@ fn sendRequest(
     msg_type: u8,
     payload_size: usize,
 ) !void {
-    // Explicit validation instead of assertions (won't be compiled out in release mode)
-    if (payload_size > 4096) return error.PayloadTooLarge;
-    if (msg_type == 0) return error.InvalidMessageType;
-
     const address = try net.Address.parseIp("127.0.0.1", port);
     const stream = try net.tcpConnectToAddress(address);
     defer stream.close();
 
-    // Prepare request
+    try sendRequestOnStream(stream, msg_type, payload_size);
+
+    _ = allocator; // Unused but needed for signature
+}
+
+fn sendLocalIpcRequest(
+    allocator: Allocator,
+    port: u16,
+    msg_type: u8,
+    payload_size: usize,
+) !void {
     var request_data: [4096]u8 = undefined;
-    var request_len: usize = 0;
+    const request_len = try prepareRequest(msg_type, payload_size, &request_data);
+
+    var response_data: [local_ipc.SLOT_PAYLOAD_BYTES]u8 = undefined;
+    const response = (try local_ipc.tryRequest(
+        allocator,
+        "127.0.0.1",
+        port,
+        msg_type,
+        request_data[0..request_len],
+        &response_data,
+        local_ipc.DEFAULT_TIMEOUT_US,
+        null,
+    )) orelse {
+        try sendRequest(allocator, port, msg_type, payload_size);
+        return;
+    };
+
+    if (msg_type == 1) {
+        if (response.len != request_len) return error.LengthMismatch;
+        if (!std.mem.eql(u8, request_data[0..request_len], response)) {
+            return error.DataMismatch;
+        }
+    }
+}
+
+fn prepareRequest(msg_type: u8, payload_size: usize, request_data: []u8) !usize {
+    // Explicit validation instead of assertions (won't be compiled out in release mode)
+    if (payload_size > 4096) return error.PayloadTooLarge;
+    if (msg_type == 0) return error.InvalidMessageType;
 
     switch (msg_type) {
         1 => { // Echo
-            request_len = @min(payload_size, request_data.len);
+            const request_len = @min(payload_size, request_data.len);
             // Fill with pattern
             for (0..request_len) |i| {
                 request_data[i] = @intCast(i % 256);
             }
+            return request_len;
         },
         2 => { // Ping
             const timestamp = std.time.milliTimestamp();
             std.mem.writeInt(i64, request_data[0..8], timestamp, .big);
-            request_len = 8;
+            return 8;
         },
         else => return error.UnknownMessageType,
     }
+}
+
+fn readExactFromStream(stream: net.Stream, buffer: []u8) !void {
+    var pos: usize = 0;
+    while (pos < buffer.len) {
+        const bytes_read = try stream.read(buffer[pos..]);
+        if (bytes_read == 0) {
+            return error.ConnectionClosed;
+        }
+        pos += bytes_read;
+    }
+}
+
+fn sendRequestOnStream(
+    stream: net.Stream,
+    msg_type: u8,
+    payload_size: usize,
+) !void {
+    // Prepare request
+    var request_data: [4096]u8 = undefined;
+    const request_len = try prepareRequest(msg_type, payload_size, &request_data);
 
     // Send: [1 byte: type][4 bytes: length][N bytes: data]
     var header: [5]u8 = undefined;
@@ -417,16 +527,14 @@ fn sendRequest(
 
     // Read response
     var response_header: [5]u8 = undefined;
-    const header_read = try stream.read(&response_header);
-    if (header_read < 5) return error.InvalidResponse;
+    try readExactFromStream(stream, &response_header);
 
     const response_len = std.mem.readInt(u32, response_header[1..5], .big);
     // Explicit validation to prevent buffer overflow
     if (response_len > 4096) return error.ResponseTooLarge;
 
     var response_data: [4096]u8 = undefined;
-    const data_read = try stream.read(response_data[0..response_len]);
-    if (data_read < response_len) return error.IncompleteResponse;
+    try readExactFromStream(stream, response_data[0..response_len]);
 
     // Verify echo (for type 1)
     if (msg_type == 1) {
@@ -435,8 +543,6 @@ fn sendRequest(
             return error.DataMismatch;
         }
     }
-
-    _ = allocator; // Unused but needed for signature
 }
 
 fn calculateAverage(values: []const u64) f64 {
@@ -463,6 +569,14 @@ pub fn printResults(results: TestResults, config: TestConfig) void {
 
     // Show test mode
     std.log.info("Test Mode:          {s}", .{@tagName(config.mode)});
+    std.log.info("Connections:        {s}", .{
+        if (config.use_local_ipc)
+            "local-ipc"
+        else if (config.persistent_connections)
+            "persistent"
+        else
+            "per-request",
+    });
     if (config.mode == .duration or config.mode == .hybrid) {
         if (config.duration_seconds) |dur| {
             std.log.info("Duration Limit:     {}s", .{dur});
@@ -514,6 +628,8 @@ fn printUsage() void {
     std.log.info("  --hybrid           - Use both duration and request limits", .{});
     std.log.info("  --single-test      - Run single test with exact CLI parameters (skip test suite)", .{});
     std.log.info("  --message-type=N   - Message type for single test (1=echo, 2=ping, default: 2)", .{});
+    std.log.info("  --persistent       - Reuse one TCP connection per client", .{});
+    std.log.info("  --local-ipc        - Use local shared-memory transport when available", .{});
     std.log.info("  --help             - Show this help message", .{});
     std.log.info("", .{});
     std.log.info("Examples:", .{});
@@ -522,6 +638,12 @@ fn printUsage() void {
     std.log.info("", .{});
     std.log.info("  test_harness 8080 100 --duration=600 --progress=30", .{});
     std.log.info("    -> Run for 10 minutes with 100 clients, report every 30s", .{});
+    std.log.info("", .{});
+    std.log.info("  test_harness 8080 100 --duration=60 --persistent --single-test", .{});
+    std.log.info("    -> Run a persistent-connection benchmark for 60 seconds", .{});
+    std.log.info("", .{});
+    std.log.info("  test_harness 8080 100 --duration=60 --local-ipc --single-test", .{});
+    std.log.info("    -> Run a local shared-memory transport benchmark for 60 seconds", .{});
     std.log.info("", .{});
     std.log.info("  test_harness 8080 50 --duration=300 --requests=100000 --hybrid", .{});
     std.log.info("    -> Stop after 5 minutes OR 100K requests (whichever first)", .{});
@@ -560,6 +682,8 @@ pub fn main() !void {
     var progress_interval: u64 = 0;
     var single_test_mode: bool = false;
     var message_type_override: ?u8 = null;
+    var persistent_connections = false;
+    var use_local_ipc = false;
 
     // Simple flag parsing
     for (args) |arg| {
@@ -580,6 +704,10 @@ pub fn main() !void {
         } else if (std.mem.startsWith(u8, arg, "--message-type=")) {
             const value = arg["--message-type=".len..];
             message_type_override = try std.fmt.parseInt(u8, value, 10);
+        } else if (std.mem.eql(u8, arg, "--persistent")) {
+            persistent_connections = true;
+        } else if (std.mem.eql(u8, arg, "--local-ipc")) {
+            use_local_ipc = true;
         }
     }
 
@@ -605,6 +733,8 @@ pub fn main() !void {
                 .message_type = 1,
                 .payload_size = 64,
                 .ramp_up = false,
+                .persistent_connections = persistent_connections,
+                .use_local_ipc = use_local_ipc,
                 .progress_interval_seconds = 0,
             };
             var results = try runLoadTest(allocator, test_config);
@@ -626,6 +756,8 @@ pub fn main() !void {
                 .message_type = 1,
                 .payload_size = 1024,
                 .ramp_up = true,
+                .persistent_connections = persistent_connections,
+                .use_local_ipc = use_local_ipc,
                 .progress_interval_seconds = 0,
             };
             var results = try runLoadTest(allocator, test_config);
@@ -647,6 +779,8 @@ pub fn main() !void {
                 .message_type = 1,
                 .payload_size = 256,
                 .ramp_up = true,
+                .persistent_connections = persistent_connections,
+                .use_local_ipc = use_local_ipc,
                 .progress_interval_seconds = 0,
             };
             var results = try runLoadTest(allocator, test_config);
@@ -668,6 +802,8 @@ pub fn main() !void {
                 .message_type = 2,
                 .payload_size = 8,
                 .ramp_up = false,
+                .persistent_connections = persistent_connections,
+                .use_local_ipc = use_local_ipc,
                 .progress_interval_seconds = 0,
             };
             var results = try runLoadTest(allocator, test_config);
@@ -689,6 +825,8 @@ pub fn main() !void {
                 .message_type = 1,
                 .payload_size = 512,
                 .ramp_up = true,
+                .persistent_connections = persistent_connections,
+                .use_local_ipc = use_local_ipc,
                 .progress_interval_seconds = progress_interval,
             };
             var results = try runLoadTest(allocator, test_config);
@@ -707,6 +845,8 @@ pub fn main() !void {
             .message_type = msg_type,
             .payload_size = if (msg_type == 2) 8 else 64,
             .ramp_up = false,
+            .persistent_connections = persistent_connections,
+            .use_local_ipc = use_local_ipc,
             .progress_interval_seconds = progress_interval,
         };
         var results = try runLoadTest(allocator, test_config);

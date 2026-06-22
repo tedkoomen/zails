@@ -46,7 +46,7 @@ test "basic publish and subscribe flow" {
             .model_id = i,
             .data = "",
         };
-        bus.publish(event);
+        _ = bus.publish(event);
     }
 
     // Check stats
@@ -103,7 +103,7 @@ test "multiple subscribers to same topic" {
         .model_id = 1,
         .data = "",
     };
-    bus.publish(event);
+    _ = bus.publish(event);
 
     // Both subscribers should receive the event
     // (Note: actual delivery happens asynchronously in workers)
@@ -138,7 +138,7 @@ test "wildcard topic matching" {
         .model_id = 1,
         .data = "",
     };
-    bus.publish(event1);
+    _ = bus.publish(event1);
 
     const event2 = Event{
         .id = generateEventId(),
@@ -149,7 +149,7 @@ test "wildcard topic matching" {
         .model_id = 2,
         .data = "",
     };
-    bus.publish(event2);
+    _ = bus.publish(event2);
 
     // This should NOT match
     const event3 = Event{
@@ -161,7 +161,7 @@ test "wildcard topic matching" {
         .model_id = 3,
         .data = "",
     };
-    bus.publish(event3);
+    _ = bus.publish(event3);
 
     const stats = bus.getStats();
     try testing.expectEqual(@as(u64, 3), stats.published);
@@ -202,7 +202,7 @@ test "filter by integer field - price greater than" {
     };
     low_event.setField("symbol", .{ .string = FixedString.init("AAPL") });
     low_event.setField("price", .{ .int = 500 });
-    bus.publish(low_event);
+    _ = bus.publish(low_event);
 
     // High price - should match
     var high_event = Event{
@@ -216,7 +216,7 @@ test "filter by integer field - price greater than" {
     };
     high_event.setField("symbol", .{ .string = FixedString.init("TSLA") });
     high_event.setField("price", .{ .int = 15000 });
-    bus.publish(high_event);
+    _ = bus.publish(high_event);
 
     bus.unsubscribe(sub_id);
 }
@@ -254,7 +254,7 @@ test "filter by string field - exact match" {
     };
     aapl_event.setField("symbol", .{ .string = FixedString.init("AAPL") });
     aapl_event.setField("price", .{ .int = 150 });
-    bus.publish(aapl_event);
+    _ = bus.publish(aapl_event);
 
     // TSLA - should NOT match
     var tsla_event = Event{
@@ -268,7 +268,7 @@ test "filter by string field - exact match" {
     };
     tsla_event.setField("symbol", .{ .string = FixedString.init("TSLA") });
     tsla_event.setField("price", .{ .int = 200 });
-    bus.publish(tsla_event);
+    _ = bus.publish(tsla_event);
 
     bus.unsubscribe(sub_id);
 }
@@ -307,7 +307,7 @@ test "multiple filter conditions with AND logic" {
     };
     match_event.setField("symbol", .{ .string = FixedString.init("AAPL") });
     match_event.setField("price", .{ .int = 150 });
-    bus.publish(match_event);
+    _ = bus.publish(match_event);
 
     // AAPL with low price - NO MATCH
     var no_match1 = Event{
@@ -321,7 +321,7 @@ test "multiple filter conditions with AND logic" {
     };
     no_match1.setField("symbol", .{ .string = FixedString.init("AAPL") });
     no_match1.setField("price", .{ .int = 50 });
-    bus.publish(no_match1);
+    _ = bus.publish(no_match1);
 
     // TSLA with high price - NO MATCH
     var no_match2 = Event{
@@ -335,7 +335,7 @@ test "multiple filter conditions with AND logic" {
     };
     no_match2.setField("symbol", .{ .string = FixedString.init("TSLA") });
     no_match2.setField("price", .{ .int = 200 });
-    bus.publish(no_match2);
+    _ = bus.publish(no_match2);
 
     bus.unsubscribe(sub_id);
 }
@@ -366,7 +366,7 @@ test "queue overflow and back-pressure" {
             .model_id = i,
             .data = "",
         };
-        bus.publish(event);
+        _ = bus.publish(event);
     }
 
     const stats = bus.getStats();
@@ -470,7 +470,7 @@ test "statistics tracking" {
             .model_id = i,
             .data = "",
         };
-        bus.publish(event);
+        _ = bus.publish(event);
     }
 
     stats = bus.getStats();

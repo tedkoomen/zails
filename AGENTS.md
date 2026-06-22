@@ -1,6 +1,6 @@
-# Claude AI Context - Zails Framework
+# Codex AI Context - Zails Framework
 
-This file contains essential context for Claude AI when working on the Zails framework codebase.
+This file contains essential context for Codex AI when working on the Zails framework codebase.
 
 ## Project Overview
 

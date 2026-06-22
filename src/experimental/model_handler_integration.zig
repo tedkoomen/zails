@@ -5,39 +5,51 @@
 /// - onCreate handler
 /// - onUpdate handler
 /// - onDelete handler
-/// - Handler registry
+///
+/// Handlers are domain-agnostic — they receive model data and an allocator,
+/// and simply call model setters. The feedback loop prevention is automatic
+/// (the event worker thread-local tags outgoing events so the originating
+/// handler is skipped on delivery).
 ///
 /// Example:
-///   const Trade = ReactiveModelWithHandlers("trades", .{
-///       .symbol = .String,
-///       .price = .i64,
-///   }, .{
-///       .onCreate = myOnCreateHandler,
-///       .onUpdate = myOnUpdateHandler,
-///   });
+///
+///   const Trade = struct {
+///       base: ReactiveModel("Trade", .{ .symbol = .String, .price = .i64 }),
+///
+///       pub fn setPrice(self: *Trade, value: i64) !void {
+///           try self.base.set("price", value);
+///       }
+///   };
+///
+///   // Register handlers — they're just functions, no bus/context plumbing:
+///   fn onTradeUpdated(data: []const u8, allocator: Allocator) void {
+///       // pure domain logic here
+///   }
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ReactiveModel = @import("reactive_model.zig").ReactiveModel;
-const message_bus = @import("message_bus/mod.zig");
-const topic_matcher = @import("message_bus/topic_matcher.zig");
-const model_topics = @import("message_bus/model_topics.zig");
-const Event = @import("event.zig").Event;
+const message_bus = @import("../message_bus/mod.zig");
+const topic_matcher = @import("../message_bus/topic_matcher.zig");
+const model_topics = @import("../message_bus/model_topics.zig");
+const Event = @import("../event.zig").Event;
 const TopicId = topic_matcher.TopicId;
 const Topic = topic_matcher.Topic;
 const EventKind = topic_matcher.EventKind;
 
-/// Handler function type for model events
+/// Handler function type for model events.
+/// Receives serialized model data and an allocator — pure domain logic.
+/// No bus, no subscription IDs, no event plumbing visible to the handler.
 pub const ModelHandlerFn = *const fn (model_data: []const u8, allocator: Allocator) void;
 
-/// Handler configuration for a model
+/// Handler configuration for a model.
 pub const HandlerConfig = struct {
     onCreate: ?ModelHandlerFn = null,
     onUpdate: ?ModelHandlerFn = null,
     onDelete: ?ModelHandlerFn = null,
 };
 
-/// Create a wrapper for a model handler (comptime)
+/// Create a wrapper that adapts a ModelHandlerFn to the bus HandlerFn signature.
 fn createHandlerWrapper(comptime handler_fn: ModelHandlerFn) message_bus.HandlerFn {
     const Wrapper = struct {
         fn wrapper(event: *const Event, alloc: Allocator) void {
@@ -47,7 +59,11 @@ fn createHandlerWrapper(comptime handler_fn: ModelHandlerFn) message_bus.Handler
     return Wrapper.wrapper;
 }
 
-/// Reactive model with integrated handlers
+/// Reactive model with integrated handlers.
+///
+/// This provides the registration glue between a ReactiveModel and the
+/// message bus. Domain models compose this to get automatic handler
+/// registration on the correct topics.
 pub fn ReactiveModelWithHandlers(
     comptime model_name: []const u8,
     comptime fields: anytype,
@@ -58,43 +74,38 @@ pub fn ReactiveModelWithHandlers(
     return struct {
         const Self = @This();
 
-        // Embed base model
+        /// The underlying reactive model.
         base: BaseModel,
 
-        // Handler configuration (comptime)
+        /// Handler configuration (comptime).
         pub const Handlers = handlers;
 
-        /// Initialize model
-        pub fn init(allocator: Allocator) Self {
+        /// Initialize model.
+        pub fn init(allocator: Allocator, bus: ?*message_bus.MessageBus) Self {
             return Self{
-                .base = BaseModel.init(allocator),
+                .base = BaseModel.init(allocator, bus),
             };
         }
 
-        /// Deinitialize model
+        /// Deinitialize model.
         pub fn deinit(self: *Self) void {
             self.base.deinit();
         }
 
-        /// Get version number
+        /// Get version number.
         pub fn getVersion(self: *const Self) u64 {
             return self.base.getVersion();
         }
 
-        /// Serialize to JSON
-        pub fn toJSON(self: *Self, buffer: []u8) ![]const u8 {
-            return self.base.toJSON(buffer);
-        }
-
-        // Field accessors must be defined per model
-        // (can't be generic due to field-specific methods like getSymbol, setPrice, etc.)
-
-        /// Register handlers with message bus
+        /// Register handlers with message bus.
+        /// Called once at startup. After this, any mutation on any instance
+        /// of this model type will trigger the appropriate handler — and
+        /// the handler that caused the mutation is automatically excluded
+        /// from receiving its own event.
         pub fn registerHandlers(bus: *message_bus.MessageBus, allocator: Allocator) !void {
             _ = allocator;
             const filter = message_bus.Filter{ .conditions = &.{} };
 
-            // Register onCreate handler
             if (comptime Handlers.onCreate) |handler| {
                 const topic = comptime model_name ++ ".created";
                 const wrapper = comptime createHandlerWrapper(handler);
@@ -102,7 +113,6 @@ pub fn ReactiveModelWithHandlers(
                 std.log.info("Registered onCreate handler for {s}", .{model_name});
             }
 
-            // Register onUpdate handler
             if (comptime Handlers.onUpdate) |handler| {
                 const topic = comptime model_name ++ ".updated";
                 const wrapper = comptime createHandlerWrapper(handler);
@@ -110,7 +120,6 @@ pub fn ReactiveModelWithHandlers(
                 std.log.info("Registered onUpdate handler for {s}", .{model_name});
             }
 
-            // Register onDelete handler
             if (comptime Handlers.onDelete) |handler| {
                 const topic = comptime model_name ++ ".deleted";
                 const wrapper = comptime createHandlerWrapper(handler);
@@ -119,15 +128,13 @@ pub fn ReactiveModelWithHandlers(
             }
         }
 
-        /// Topic constants for this model (comptime)
+        /// Topic constants for this model (comptime).
         pub const Topics = struct {
-            // Hash-based IDs (for TopicPattern matching)
             pub const created_id = Topic(model_name, .created);
             pub const updated_id = Topic(model_name, .updated);
             pub const deleted_id = Topic(model_name, .deleted);
             pub const wildcard_id = topic_matcher.TopicWildcard(model_name);
 
-            // String topics (for message bus subscribe/publish)
             pub const created = model_topics.ModelTopics(model_name).created;
             pub const updated = model_topics.ModelTopics(model_name).updated;
             pub const deleted = model_topics.ModelTopics(model_name).deleted;
@@ -137,10 +144,9 @@ pub fn ReactiveModelWithHandlers(
 }
 
 // ============================================================================
-// Example Usage
+// Example: Trade domain model
 // ============================================================================
 
-// Define handlers
 fn onTradeCreated(model_data: []const u8, allocator: Allocator) void {
     _ = allocator;
     std.log.info("Trade created: {s}", .{model_data});
@@ -148,6 +154,9 @@ fn onTradeCreated(model_data: []const u8, allocator: Allocator) void {
 
 fn onTradeUpdated(model_data: []const u8, allocator: Allocator) void {
     _ = allocator;
+    // Pure domain logic — no bus or subscription awareness needed.
+    // If this handler mutates a Trade, the resulting event will NOT
+    // be delivered back here (automatic feedback loop prevention).
     std.log.info("Trade updated: {s}", .{model_data});
 }
 
@@ -156,7 +165,6 @@ fn onTradeDeleted(model_data: []const u8, allocator: Allocator) void {
     std.log.info("Trade deleted: {s}", .{model_data});
 }
 
-// Define model with integrated handlers
 const Trade = ReactiveModelWithHandlers("Trade", .{
     .symbol = .String,
     .price = .i64,
@@ -166,36 +174,6 @@ const Trade = ReactiveModelWithHandlers("Trade", .{
     .onUpdate = onTradeUpdated,
     .onDelete = onTradeDeleted,
 });
-
-// Usage example
-pub fn example() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // Initialize message bus
-    var bus = try message_bus.MessageBus.init(allocator, .{});
-    defer bus.deinit();
-    try bus.start();
-
-    // Register handlers (automatic!)
-    try Trade.registerHandlers(&bus, allocator);
-
-    // Create model instance
-    var trade = Trade.init(allocator);
-    defer trade.deinit();
-    trade.base.id = 1;
-
-    // Updates automatically trigger handlers
-    try trade.base.setSymbol("AAPL", &bus);
-    try trade.base.setPrice(15000, &bus);
-    try trade.base.setQuantity(100, &bus);
-
-    // Wait for delivery
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-
-    std.log.info("Trade version: {d}", .{trade.getVersion()});
-}
 
 // ============================================================================
 // Tests
@@ -210,11 +188,9 @@ test "model with integrated handlers" {
     });
     defer bus.deinit();
 
-    // Register handlers
     try Trade.registerHandlers(&bus, allocator);
 
-    // Create model
-    var trade = Trade.init(allocator);
+    var trade = Trade.init(allocator, null);
     defer trade.deinit();
 
     try std.testing.expectEqual(@as(u64, 1), trade.getVersion());

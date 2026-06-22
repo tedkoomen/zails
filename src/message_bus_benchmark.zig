@@ -10,7 +10,6 @@
 ///   --subscribers N   Number of subscribers (default: 10)
 ///   --duration N      Duration in seconds (default: 10)
 ///   --mode MODE       Test mode: latency, throughput, stress (default: latency)
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const message_bus = @import("message_bus/mod.zig");
@@ -24,9 +23,9 @@ const BenchmarkConfig = struct {
     mode: TestMode = .latency,
 
     const TestMode = enum {
-        latency,    // Measure publish latency
+        latency, // Measure publish latency
         throughput, // Measure max throughput
-        stress,     // Stress test with high concurrency
+        stress, // Stress test with high concurrency
     };
 };
 
@@ -34,6 +33,7 @@ const Stats = struct {
     total_published: u64 = 0,
     total_delivered: u64 = 0,
     total_dropped: u64 = 0,
+    total_backpressure: u64 = 0,
     publish_latencies_ns: std.ArrayList(u64),
     delivery_latencies_ns: std.ArrayList(u64),
     start_time: i64 = 0,
@@ -85,6 +85,7 @@ const Stats = struct {
             @as(f64, @floatFromInt(self.total_delivered)) / duration_s,
         });
         std.debug.print("  Dropped:    {} events\n", .{self.total_dropped});
+        std.debug.print("  Backpressure: {} events\n", .{self.total_backpressure});
         std.debug.print("\n", .{});
 
         // Publish latency
@@ -163,9 +164,10 @@ fn testLatency(allocator: Allocator, config: BenchmarkConfig) !void {
 
     // Initialize message bus
     var bus = try message_bus.MessageBus.init(allocator, .{
-        .queue_capacity = 8192,
+        .queue_capacity = 65536,
         .worker_count = config.worker_count,
-        .flush_interval_ms = 10,
+        .flush_interval_ms = 1,
+        .overflow_policy = .backpressure,
     });
     defer bus.deinit();
 
@@ -191,10 +193,7 @@ fn testLatency(allocator: Allocator, config: BenchmarkConfig) !void {
     while (i < config.event_count) : (i += 1) {
         // Create event
         var data_buffer: [256]u8 = undefined;
-        const data = try std.fmt.bufPrint(&data_buffer,
-            "{{\"id\":{d},\"name\":\"item_{d}\",\"value\":{d}}}",
-            .{i, i, i * 100}
-        );
+        const data = try std.fmt.bufPrint(&data_buffer, "{{\"id\":{d},\"name\":\"item_{d}\",\"value\":{d}}}", .{ i, i, i * 100 });
 
         const event = Event{
             .id = @intCast(i),
@@ -208,7 +207,7 @@ fn testLatency(allocator: Allocator, config: BenchmarkConfig) !void {
 
         // Measure publish latency
         const start = std.time.nanoTimestamp();
-        bus.publish(event);
+        _ = bus.publish(event);
         const latency_ns = @as(u64, @intCast(std.time.nanoTimestamp() - start));
 
         try global_stats.recordPublish(latency_ns);
@@ -228,6 +227,7 @@ fn testLatency(allocator: Allocator, config: BenchmarkConfig) !void {
     // Get bus stats
     const bus_stats = bus.getStats();
     global_stats.total_dropped = bus_stats.dropped;
+    global_stats.total_backpressure = bus_stats.backpressure;
 
     // Unsubscribe
     for (subscriptions) |sub| {
@@ -248,9 +248,10 @@ fn testThroughput(allocator: Allocator, config: BenchmarkConfig) !void {
 
     // Initialize message bus with larger queue
     var bus = try message_bus.MessageBus.init(allocator, .{
-        .queue_capacity = 16384, // Larger queue for throughput test
+        .queue_capacity = 65536, // Larger queue for throughput test
         .worker_count = config.worker_count,
         .flush_interval_ms = 1, // Aggressive polling
+        .overflow_policy = .backpressure,
     });
     defer bus.deinit();
 
@@ -271,10 +272,7 @@ fn testThroughput(allocator: Allocator, config: BenchmarkConfig) !void {
     var event_id: usize = 0;
     while (std.time.microTimestamp() < end_time) {
         var data_buffer: [128]u8 = undefined;
-        const data = try std.fmt.bufPrint(&data_buffer,
-            "{{\"id\":{d}}}",
-            .{event_id}
-        );
+        const data = try std.fmt.bufPrint(&data_buffer, "{{\"id\":{d}}}", .{event_id});
 
         const event = Event{
             .id = @intCast(event_id),
@@ -286,7 +284,7 @@ fn testThroughput(allocator: Allocator, config: BenchmarkConfig) !void {
             .data = data,
         };
 
-        bus.publish(event);
+        _ = bus.publish(event);
         event_id += 1;
 
         // Check for queue overflow
@@ -305,6 +303,7 @@ fn testThroughput(allocator: Allocator, config: BenchmarkConfig) !void {
     const bus_stats = bus.getStats();
     global_stats.total_published = bus_stats.published;
     global_stats.total_dropped = bus_stats.dropped;
+    global_stats.total_backpressure = bus_stats.backpressure;
 
     bus.unsubscribe(sub_id);
 
@@ -323,9 +322,10 @@ fn testStress(allocator: Allocator, config: BenchmarkConfig) !void {
 
     // Initialize message bus
     var bus = try message_bus.MessageBus.init(allocator, .{
-        .queue_capacity = 16384,
+        .queue_capacity = 65536,
         .worker_count = config.worker_count,
-        .flush_interval_ms = 5,
+        .flush_interval_ms = 1,
+        .overflow_policy = .backpressure,
     });
     defer bus.deinit();
 
@@ -358,10 +358,7 @@ fn testStress(allocator: Allocator, config: BenchmarkConfig) !void {
         const topic = topics[event_id % topics.len];
 
         var data_buffer: [256]u8 = undefined;
-        const data = try std.fmt.bufPrint(&data_buffer,
-            "{{\"id\":{d},\"topic\":\"{s}\"}}",
-            .{event_id, topic}
-        );
+        const data = try std.fmt.bufPrint(&data_buffer, "{{\"id\":{d},\"topic\":\"{s}\"}}", .{ event_id, topic });
 
         const event = Event{
             .id = @intCast(event_id),
@@ -373,7 +370,7 @@ fn testStress(allocator: Allocator, config: BenchmarkConfig) !void {
             .data = data,
         };
 
-        bus.publish(event);
+        _ = bus.publish(event);
         event_id += 1;
 
         if (event_id % 5000 == 0) {
@@ -391,6 +388,7 @@ fn testStress(allocator: Allocator, config: BenchmarkConfig) !void {
     const bus_stats = bus.getStats();
     global_stats.total_published = bus_stats.published;
     global_stats.total_dropped = bus_stats.dropped;
+    global_stats.total_backpressure = bus_stats.backpressure;
 
     // Unsubscribe
     for (subscriptions) |sub| {

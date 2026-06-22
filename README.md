@@ -147,6 +147,7 @@ Events carry up to 8 typed fields (`FieldValue`: int, uint, float, string, bool)
 # Build benchmarks (always use ReleaseFast for accurate numbers)
 zig build message-bus-bench -Doptimize=ReleaseFast
 zig build heartbeat-bench -Doptimize=ReleaseFast
+zig build allocation-probe -Doptimize=ReleaseFast
 
 # Filter microbenchmark — raw filter.matches() ns/op
 ./zig-out/bin/message_bus_benchmark --mode filter-micro --events 10000000
@@ -162,6 +163,9 @@ zig build heartbeat-bench -Doptimize=ReleaseFast
 
 # Stress test (many subscribers, multiple topics)
 ./zig-out/bin/message_bus_benchmark --mode stress --subscribers 50 --duration 10
+
+# Allocation probe — verifies hot paths on clean and fragmented heaps
+./zig-out/bin/allocation_probe
 ```
 
 ## CLI Commands

@@ -11,7 +11,6 @@ const generateEventId = @import("../src/event.zig").generateEventId;
 /// 3. Reactive handlers that execute automatically
 ///
 /// Run with: zig run examples/message_bus_example.zig
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -90,7 +89,7 @@ pub fn main() !void {
         .model_id = 1,
         .data = "{\"symbol\":\"TSLA\",\"price\":5000,\"quantity\":10}",
     };
-    bus.publish(trade1);
+    _ = bus.publish(trade1);
     std.log.info("Published: TSLA @ $5,000", .{});
 
     // Trade 2: High-value AAPL (matches: all trades, high value, AAPL)
@@ -103,7 +102,7 @@ pub fn main() !void {
         .model_id = 2,
         .data = "{\"symbol\":\"AAPL\",\"price\":15000,\"quantity\":100}",
     };
-    bus.publish(trade2);
+    _ = bus.publish(trade2);
     std.log.info("Published: AAPL @ $15,000", .{});
 
     // Trade 3: High-value GOOGL (matches: all trades, high value)
@@ -116,7 +115,7 @@ pub fn main() !void {
         .model_id = 3,
         .data = "{\"symbol\":\"GOOGL\",\"price\":12000,\"quantity\":50}",
     };
-    bus.publish(trade3);
+    _ = bus.publish(trade3);
     std.log.info("Published: GOOGL @ $12,000", .{});
 
     // Trade 4: Low-value AAPL (matches: all trades, AAPL)
@@ -129,7 +128,7 @@ pub fn main() !void {
         .model_id = 4,
         .data = "{\"symbol\":\"AAPL\",\"price\":8000,\"quantity\":20}",
     };
-    bus.publish(trade4);
+    _ = bus.publish(trade4);
     std.log.info("Published: AAPL @ $8,000", .{});
 
     // Give workers time to process events

@@ -5,7 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const proto = @import("proto.zig");
-const result = @import("result.zig");
+const result = @import("result");
 
 /// Adapt a standard handler to gRPC-style request/response
 pub fn GrpcHandlerAdapter(comptime Handler: type) type {

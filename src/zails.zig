@@ -2,7 +2,6 @@
 /// Commands:
 ///   zails init <project_name>  - Create a new Zails project
 ///   zails build                - Build the current project
-
 const std = @import("std");
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
@@ -15,12 +14,23 @@ const embedded_server_files = [_]EmbeddedFile{
     .{ .name = "signals.zig", .content = @embedFile("signals.zig") },
     .{ .name = "proto.zig", .content = @embedFile("proto.zig") },
     .{ .name = "pool_lockfree.zig", .content = @embedFile("pool_lockfree.zig") },
+    .{ .name = "handler_interface.zig", .content = @embedFile("handler_interface.zig") },
     .{ .name = "handler_registry.zig", .content = @embedFile("handler_registry.zig") },
     .{ .name = "server_framework.zig", .content = @embedFile("server_framework.zig") },
-    .{ .name = "threadpool_framework.zig", .content = @embedFile("threadpool_framework.zig") },
+    .{ .name = "async_clickhouse.zig", .content = @embedFile("async_clickhouse.zig") },
+    .{ .name = "clickhouse_client.zig", .content = @embedFile("clickhouse_client.zig") },
+    .{ .name = "epoll_threadpool.zig", .content = @embedFile("epoll_threadpool.zig") },
+    .{ .name = "epoll_worker.zig", .content = @embedFile("epoll_worker.zig") },
+    .{ .name = "metrics.zig", .content = @embedFile("metrics.zig") },
     .{ .name = "client.zig", .content = @embedFile("client.zig") },
+    .{ .name = "local_ipc.zig", .content = @embedFile("local_ipc.zig") },
     .{ .name = "tls_openssl.zig", .content = @embedFile("tls_openssl.zig") },
     .{ .name = "result.zig", .content = @embedFile("result.zig") },
+};
+
+const embedded_zails_headers = [_]EmbeddedFile{
+    .{ .name = "zails.h", .content = @embedFile("include/zails/zails.h") },
+    .{ .name = "zails.hpp", .content = @embedFile("include/zails/zails.hpp") },
 };
 
 const Command = enum {
@@ -157,6 +167,9 @@ fn initProject(project_name: []const u8) !void {
     try project_dir.makeDir("views");
     try project_dir.makeDir("server");
     try project_dir.makeDir("src");
+    try project_dir.makeDir("native");
+    try project_dir.makeDir("include");
+    try project_dir.makeDir("include/zails");
 
     std.log.info("  ✓ Created directory structure", .{});
 
@@ -173,6 +186,25 @@ fn initProject(project_name: []const u8) !void {
     }
 
     std.log.info("  ✓ Copied server framework files", .{});
+
+    try createServerGlobals(project_dir);
+    std.log.info("  ✓ Created server/globals.zig", .{});
+
+    try createServerMod(project_dir);
+    std.log.info("  ✓ Created server/mod.zig", .{});
+
+    {
+        var include_dir = try project_dir.openDir("include/zails", .{});
+        defer include_dir.close();
+
+        for (embedded_zails_headers) |entry| {
+            const dest_file = try include_dir.createFile(entry.name, .{});
+            defer dest_file.close();
+            try dest_file.writeAll(entry.content);
+        }
+    }
+
+    std.log.info("  ✓ Copied C/C++ runtime headers", .{});
 
     // Create handlers/mod.zig
     try createHandlersMod(project_dir);
@@ -205,6 +237,43 @@ fn initProject(project_name: []const u8) !void {
     std.log.info("  zails build", .{});
     std.log.info("  ./zig-out/bin/server --ports 8080", .{});
     std.log.info("", .{});
+}
+
+fn createServerMod(project_dir: fs.Dir) !void {
+    var server_dir = try project_dir.openDir("server", .{});
+    defer server_dir.close();
+
+    const content =
+        \\pub const Config = @import("config.zig").Config;
+        \\pub const SignalHandler = @import("signals.zig").SignalHandler;
+        \\pub const numa = @import("numa.zig");
+        \\pub const epoll_threadpool = @import("epoll_threadpool.zig");
+        \\pub const handler_registry = @import("handler_registry.zig");
+        \\pub const globals = @import("globals.zig");
+        \\
+    ;
+
+    const file = try server_dir.createFile("mod.zig", .{});
+    defer file.close();
+    try file.writeAll(content);
+}
+
+fn createServerGlobals(project_dir: fs.Dir) !void {
+    var server_dir = try project_dir.openDir("server", .{});
+    defer server_dir.close();
+
+    const content =
+        \\const metrics_mod = @import("metrics.zig");
+        \\const async_clickhouse = @import("async_clickhouse.zig");
+        \\
+        \\pub var global_metrics: ?*metrics_mod.MetricsRegistry = null;
+        \\pub var global_clickhouse: ?*async_clickhouse.AsyncClickHouseWriter = null;
+        \\
+    ;
+
+    const file = try server_dir.createFile("globals.zig", .{});
+    defer file.close();
+    try file.writeAll(content);
 }
 
 fn createHandlersMod(project_dir: fs.Dir) !void {
@@ -393,15 +462,18 @@ fn createMainZig(project_dir: fs.Dir) !void {
         \\/// Handlers are auto-discovered from handlers/ folder at compile time
         \\
         \\const std = @import("std");
-        \\const Config = @import("../server/config.zig").Config;
-        \\const SignalHandler = @import("../server/signals.zig").SignalHandler;
-        \\const numa = @import("../server/numa.zig");
-        \\const threadpool_framework = @import("../server/threadpool_framework.zig");
-        \\const handler_registry = @import("../server/handler_registry.zig");
+        \\const server = @import("server");
+        \\const Config = server.Config;
+        \\const SignalHandler = server.SignalHandler;
+        \\const numa = server.numa;
+        \\const epoll_threadpool = server.epoll_threadpool;
+        \\const handler_registry = server.handler_registry;
         \\const net = std.net;
         \\
+        \\pub const globals = server.globals;
+        \\
         \\// Import all handlers from handlers/ folder
-        \\const handlers = @import("../handlers/mod.zig");
+        \\const handlers = @import("handlers");
         \\
         \\pub fn main() !void {
         \\    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -458,19 +530,23 @@ fn createMainZig(project_dir: fs.Dir) !void {
         \\        workers_per_node,
         \\    });
         \\
-        \\    // Create lock-free thread pools (one per NUMA node)
+        \\    // Connection tracking
+        \\    var active_connections = std.atomic.Value(usize).init(0);
+        \\
+        \\    // Create event-driven epoll thread pools (one per NUMA node)
         \\    var thread_pools = try allocator.alloc(
-        \\        threadpool_framework.LockFreeThreadPool,
+        \\        epoll_threadpool.EpollThreadPool,
         \\        topology.nodes.len,
         \\    );
         \\    defer allocator.free(thread_pools);
         \\
         \\    for (topology.nodes, 0..) |node, i| {
-        \\        thread_pools[i] = try threadpool_framework.LockFreeThreadPool.init(
+        \\        thread_pools[i] = try epoll_threadpool.EpollThreadPool.init(
         \\            allocator,
         \\            node,
         \\            workers_per_node,
         \\            &registry,
+        \\            &active_connections,
         \\        );
         \\    }
         \\
@@ -518,10 +594,10 @@ fn createMainZig(project_dir: fs.Dir) !void {
         \\        for (listeners, 0..) |*listener, i| {
         \\            const connection = listener.accept() catch continue;
         \\
-        \\            // Route to NUMA-local threadpool
+        \\            // Route to NUMA-local threadpool (epoll-based)
         \\            const node_idx = i % topology.nodes.len;
         \\            thread_pools[node_idx].spawn(connection) catch |err| {
-        \\                std.log.err("Failed to enqueue connection: {}", .{err});
+        \\                std.log.err("Failed to add connection to epoll: {}", .{err});
         \\                connection.stream.close();
         \\                continue;
         \\            };
@@ -560,11 +636,36 @@ fn createBuildZig(project_dir: fs.Dir) !void {
         \\        .optimize = optimize,
         \\    });
         \\
+        \\    const result_module = b.createModule(.{
+        \\        .root_source_file = b.path("server/result.zig"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    });
+        \\
+        \\    const handlers_module = b.createModule(.{
+        \\        .root_source_file = b.path("handlers/mod.zig"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    });
+        \\    handlers_module.addImport("result", result_module);
+        \\
+        \\    const server_module = b.createModule(.{
+        \\        .root_source_file = b.path("server/mod.zig"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    });
+        \\    server_module.addImport("result", result_module);
+        \\
+        \\    root_module.addImport("server", server_module);
+        \\    root_module.addImport("handlers", handlers_module);
+        \\
         \\    // Main server executable
         \\    const exe = b.addExecutable(.{
         \\        .name = "server",
         \\        .root_module = root_module,
         \\    });
+        \\
+        \\    addNativeCppModules(b, exe);
         \\
         \\    b.installArtifact(exe);
         \\
@@ -604,6 +705,33 @@ fn createBuildZig(project_dir: fs.Dir) !void {
         \\    client_run_step.dependOn(&client_run_cmd.step);
         \\}
         \\
+        \\fn addNativeCppModules(b: *std.Build, exe: *std.Build.Step.Compile) void {
+        \\    var native_dir = std.fs.cwd().openDir("native", .{ .iterate = true }) catch |err| switch (err) {
+        \\        error.FileNotFound => return,
+        \\        else => @panic("failed to open native/ directory"),
+        \\    };
+        \\    defer native_dir.close();
+        \\
+        \\    var found_cpp = false;
+        \\    var iter = native_dir.iterate();
+        \\    while (iter.next() catch @panic("failed to iterate native/ directory")) |entry| {
+        \\        if (entry.kind != .file) continue;
+        \\        if (!std.mem.endsWith(u8, entry.name, ".cpp")) continue;
+        \\
+        \\        const path = std.fmt.allocPrint(b.allocator, "native/{s}", .{entry.name}) catch @panic("OOM");
+        \\        exe.addCSourceFile(.{
+        \\            .file = b.path(path),
+        \\            .flags = &.{ "-std=c++17", "-Iinclude" },
+        \\        });
+        \\        found_cpp = true;
+        \\    }
+        \\
+        \\    if (found_cpp) {
+        \\        exe.linkLibC();
+        \\        exe.linkLibCpp();
+        \\    }
+        \\}
+        \\
     ;
 
     const file = try project_dir.createFile("build.zig", .{});
@@ -613,8 +741,7 @@ fn createBuildZig(project_dir: fs.Dir) !void {
 
 fn createReadme(project_dir: fs.Dir, project_name: []const u8) !void {
     const page_alloc = std.heap.page_allocator;
-    const content = std.fmt.allocPrint(
-        page_alloc,
+    const content = std.fmt.allocPrint(page_alloc,
         \\# {s}
         \\
         \\A high-performance server built with Zails framework.
@@ -1576,5 +1703,3 @@ fn findNextMessageType(allocator: Allocator) !u8 {
     }
     return max_type + 1;
 }
-
-

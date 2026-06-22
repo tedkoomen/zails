@@ -1,6 +1,5 @@
 /// Non-blocking asynchronous metrics export
 /// Background thread for metrics collection without blocking request processing
-
 const std = @import("std");
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
@@ -21,8 +20,11 @@ pub const AsyncMetricsExporter = struct {
         registry: *metrics.MetricsRegistry,
         runtime_controller: *@import("config_system.zig").RuntimeController,
         export_interval_seconds: u64,
-    ) !AsyncMetricsExporter {
-        var exporter = AsyncMetricsExporter{
+    ) !*AsyncMetricsExporter {
+        const exporter = try allocator.create(AsyncMetricsExporter);
+        errdefer allocator.destroy(exporter);
+
+        exporter.* = AsyncMetricsExporter{
             .thread = undefined,
             .shutdown = std.atomic.Value(bool).init(false),
             .registry = registry,
@@ -31,7 +33,7 @@ pub const AsyncMetricsExporter = struct {
             .runtime_controller = runtime_controller,
         };
 
-        exporter.thread = try Thread.spawn(.{}, workerThread, .{&exporter});
+        exporter.thread = try Thread.spawn(.{}, workerThread, .{exporter});
 
         return exporter;
     }
@@ -39,6 +41,8 @@ pub const AsyncMetricsExporter = struct {
     pub fn deinit(self: *AsyncMetricsExporter) void {
         self.shutdown.store(true, .release);
         self.thread.join();
+        const allocator = self.allocator;
+        allocator.destroy(self);
     }
 
     fn workerThread(self: *AsyncMetricsExporter) void {
@@ -83,6 +87,7 @@ pub const AsyncStatsDClient = struct {
 
     const RingBuffer = struct {
         items: []Metric,
+        sequences: []std.atomic.Value(usize),
         head: std.atomic.Value(usize),
         tail: std.atomic.Value(usize),
         capacity: usize,
@@ -100,8 +105,17 @@ pub const AsyncStatsDClient = struct {
         };
 
         fn init(allocator: Allocator, capacity: usize) !RingBuffer {
+            const items = try allocator.alloc(Metric, capacity);
+            errdefer allocator.free(items);
+            const sequences = try allocator.alloc(std.atomic.Value(usize), capacity);
+            errdefer allocator.free(sequences);
+            for (sequences, 0..) |*seq, i| {
+                seq.* = std.atomic.Value(usize).init(i);
+            }
+
             return RingBuffer{
-                .items = try allocator.alloc(Metric, capacity),
+                .items = items,
+                .sequences = sequences,
                 .head = std.atomic.Value(usize).init(0),
                 .tail = std.atomic.Value(usize).init(0),
                 .capacity = capacity,
@@ -109,42 +123,65 @@ pub const AsyncStatsDClient = struct {
         }
 
         fn deinit(self: *RingBuffer, allocator: Allocator) void {
+            allocator.free(self.sequences);
             allocator.free(self.items);
         }
 
         fn push(self: *RingBuffer, metric: Metric) bool {
-            const head = self.head.load(.acquire);
-            const next_head = (head + 1) % self.capacity;
-            const tail = self.tail.load(.acquire);
+            var head = self.head.load(.monotonic);
+            while (true) {
+                const idx = head % self.capacity;
+                const seq = self.sequences[idx].load(.acquire);
 
-            if (next_head == tail) {
-                return false; // Buffer full
+                if (seq == head) {
+                    if (self.head.cmpxchgWeak(head, head + 1, .monotonic, .monotonic)) |updated_head| {
+                        head = updated_head;
+                        continue;
+                    }
+
+                    self.items[idx] = metric;
+                    self.sequences[idx].store(head + 1, .release);
+                    return true;
+                }
+
+                if (seq < head) return false;
+                head = self.head.load(.monotonic);
             }
-
-            self.items[head] = metric;
-            self.head.store(next_head, .release);
-            return true;
         }
 
         fn pop(self: *RingBuffer) ?Metric {
-            const tail = self.tail.load(.acquire);
-            const head = self.head.load(.acquire);
+            var tail = self.tail.load(.monotonic);
+            while (true) {
+                const idx = tail % self.capacity;
+                const expected_seq = tail + 1;
+                const seq = self.sequences[idx].load(.acquire);
 
-            if (tail == head) {
-                return null; // Buffer empty
+                if (seq == expected_seq) {
+                    if (self.tail.cmpxchgWeak(tail, tail + 1, .monotonic, .monotonic)) |updated_tail| {
+                        tail = updated_tail;
+                        continue;
+                    }
+
+                    const metric = self.items[idx];
+                    self.sequences[idx].store(tail + self.capacity, .release);
+                    return metric;
+                }
+
+                if (seq < expected_seq) return null;
+                tail = self.tail.load(.monotonic);
             }
-
-            const metric = self.items[tail];
-            self.tail.store((tail + 1) % self.capacity, .release);
-            return metric;
         }
     };
 
-    pub fn init(allocator: Allocator, host: []const u8, port: u16) !AsyncStatsDClient {
+    pub fn init(allocator: Allocator, host: []const u8, port: u16) !*AsyncStatsDClient {
         const address = try std.net.Address.parseIp(host, port);
         const socket = try std.net.tcpConnectToAddress(address);
+        errdefer socket.close();
 
-        var client = AsyncStatsDClient{
+        const client = try allocator.create(AsyncStatsDClient);
+        errdefer allocator.destroy(client);
+
+        client.* = AsyncStatsDClient{
             .thread = undefined,
             .shutdown = std.atomic.Value(bool).init(false),
             .buffer = try RingBuffer.init(allocator, 4096),
@@ -152,8 +189,9 @@ pub const AsyncStatsDClient = struct {
             .allocator = allocator,
             .dropped_metrics = std.atomic.Value(u64).init(0),
         };
+        errdefer client.buffer.deinit(allocator);
 
-        client.thread = try Thread.spawn(.{}, senderThread, .{&client});
+        client.thread = try Thread.spawn(.{}, senderThread, .{client});
 
         return client;
     }
@@ -163,6 +201,8 @@ pub const AsyncStatsDClient = struct {
         self.thread.join();
         self.buffer.deinit(self.allocator);
         self.socket.close();
+        const allocator = self.allocator;
+        allocator.destroy(self);
     }
 
     /// Non-blocking counter increment
